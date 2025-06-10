@@ -5,60 +5,61 @@ import urllib.request
 import re
 from collections import Counter
 
-# =============================
-# ⚙️  BASIC CONFIGURATION
-# =============================
+# ======================================
+# ⚙️  BASIC CONFIGURATION & PAGE HEADER
+# ======================================
 
 st.set_page_config(layout="wide")
 st.title("📰 Topic Summary NoLimit Dashboard — ONM & Sosmed")
 
 
-# =============================
+# ======================================
 # 📦  DATA INGESTION LAYER
-# =============================
+# ======================================
 
 @st.cache_data(show_spinner=False)
 def extract_csv_from_zip(zip_file):
-    """Extract all *.csv in the uploaded ZIP file and return a concatenated dataframe."""
-    with zipfile.ZipFile(zip_file, "r") as z:
-        csv_files = [f for f in z.namelist() if f.endswith(".csv")]
-        if not csv_files:
-            st.error("❌ Tidak ada file .csv di dalam ZIP.")
-            return pd.DataFrame()
+    """Extract all *.csv inside a ZIP archive and concatenate them into a single DataFrame."""
+    try:
+        with zipfile.ZipFile(zip_file, "r") as z:
+            csv_files = [f for f in z.namelist() if f.endswith(".csv")]
+            if not csv_files:
+                st.error("❌ Tidak ada file .csv di dalam ZIP.")
+                return pd.DataFrame()
 
-        dfs = []
-        for f in csv_files:
-            try:
-                with z.open(f) as fh:
-                    df_part = pd.read_csv(
-                        fh,
-                        delimiter=";",
-                        quotechar='"',
-                        on_bad_lines="skip",
-                        engine="python",
-                    )
-                    dfs.append(df_part)
-            except Exception as e:
-                st.warning(f"⚠️  Gagal membaca {f}: {e}")
+            dfs = []
+            for fn in csv_files:
+                try:
+                    with z.open(fn) as fh:
+                        part = pd.read_csv(
+                            fh,
+                            delimiter=";",
+                            quotechar='"',
+                            on_bad_lines="skip",
+                            engine="python",
+                        )
+                        dfs.append(part)
+                except Exception as e:
+                    st.warning(f"⚠️  Gagal membaca {fn}: {e}")
+            return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    except zipfile.BadZipFile:
+        st.error("❌ File yang di‑upload bukan ZIP yang valid.")
+        return pd.DataFrame()
 
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-
-# =============================
-# 🔍  ADVANCED KEYWORD PARSER
-# =============================
+# ======================================
+# 🔍  ADVANCED KEYWORD PARSER & MATCHER
+# ======================================
 
 def parse_advanced_keywords(query: str):
-    """Split the user keyword query into include‑groups, exact phrases, and excluded words."""
+    """Return include groups, exact phrases and exclude list from advanced search string."""
     query = query.strip()
     if not query:
         return [], [], []
 
     include_groups, exact_phrases, exclude_words = [], [], []
-    token_pattern = r'"[^"]+"|\([^)]+\)|\S+'
-    tokens = re.findall(token_pattern, query)
-
-    for tok in tokens:
+    token_pat = r'"[^"]+"|\([^)]+\)|\S+'
+    for tok in re.findall(token_pat, query):
         if tok.startswith('"') and tok.endswith('"'):
             exact_phrases.append(tok.strip('"'))
         elif tok.startswith('-'):
@@ -67,32 +68,28 @@ def parse_advanced_keywords(query: str):
             include_groups.append([w.strip() for w in tok.strip('()').split('OR') if w.strip()])
         else:
             include_groups.append([tok.strip()])
-
     return include_groups, exact_phrases, exclude_words
 
 
 def match_advanced(text: str, includes, phrases, excludes):
-    """Return True if *text* matches the parsed keyword condition sets."""
     low = text.lower()
-    if any(w.lower() in low for w in excludes):
+    if any(w.lower() in low for w in excludes):        # ❶ Exclude hits first
         return False
-    if any(p.lower() not in low for p in phrases):
+    if any(p.lower() not in low for p in phrases):     # ❷ All phrases must exist
         return False
-    for group in includes:
-        if not any(w.lower() in low for w in group):
+    for grp in includes:                               # ❸ At least one term per OR‑group
+        if not any(w.lower() in low for w in grp):
             return False
     return True
 
 
-# =============================
-# 🎨  WORD‑CLOUD PREP HELPERS
-# =============================
+# ======================================
+# ☁️  WORD‑CLOUD SUPPORT FUNCTIONS
+# ======================================
 
 @st.cache_data(show_spinner=False)
 def load_stopwords():
-    url = (
-        "https://raw.githubusercontent.com/stopwords-iso/stopwords-id/master/stopwords-id.txt"
-    )
+    url = "https://raw.githubusercontent.com/stopwords-iso/stopwords-id/master/stopwords-id.txt"
     try:
         return set(pd.read_csv(url, header=None)[0].tolist())
     except Exception:
@@ -107,327 +104,255 @@ def build_word_freq(text_series: pd.Series, max_words: int = 500):
     return Counter(tokens).most_common(max_words)
 
 
-# =============================
-# 🖼️  SENTIMENT COLOUR TAG
-# =============================
+# ======================================
+# 🎨  HELPER FOR COLOURED SENTIMENT TAGS
+# ======================================
 
 def sentiment_badge(s):
     s = str(s).lower()
-    if s == "positive":
-        color = "green"
-    elif s == "negative":
-        color = "red"
-    elif s == "neutral":
-        color = "gray"
-    else:
-        return s  # unknown label, no styling
-    return f'<span style="color:{color};font-weight:bold">{s}</span>'
+    col = {"positive": "green", "negative": "red", "neutral": "gray"}.get(s)
+    return f'<span style="color:{col};font-weight:bold">{s}</span>' if col else s
 
 
-# =============================
-# 📊  ONM (ONLINE NEWS MONITORING) IMPLEMENTATION
-# =============================
+# ======================================
+# 📊  ONM (ONLINE NEWS) DASHBOARD
+# ======================================
 
 def run_onm_dashboard(df: pd.DataFrame):
-    """Original behaviour — assumed columns: title, body, url, tier, sentiment, label."""
-    # --- HOUSEKEEPING
-    for col in ["title", "body", "url", "sentiment"]:
-        df[col] = df[col].astype(str).str.strip("'")
+    # Basic cleaning
+    for c in ["title", "body", "url", "sentiment"]:
+        df[c] = df[c].astype(str).str.strip("'")
 
-    df["label"] = df["label"].fillna("")
-    df["tier"] = df["tier"].fillna("-")
-    df["tier"] = pd.Categorical(
-        df["tier"], categories=["Tier 1", "Tier 2", "Tier 3", "-", ""], ordered=True
-    )
+    df["label"].fillna("", inplace=True)
+    df["tier"].fillna("-", inplace=True)
+    df["tier"] = pd.Categorical(df["tier"], ["Tier 1", "Tier 2", "Tier 3", "-", ""], True)
 
-    # Sidebar filter components
     st.sidebar.markdown("## 🎛️ Filter — ONM")
 
-    # Sentiment
+    # Sidebar filters
     sentiments_all = sorted(df["sentiment"].str.lower().unique())
-    sentiment_filter = st.sidebar.selectbox("Sentimen", options=["All"] + sentiments_all)
+    sentiment_filter = st.sidebar.selectbox("Sentimen", ["All"] + sentiments_all)
 
-    # Label
-    all_labels = sorted(
-        {
-            label.strip()
-            for sub in df["label"].astype(str)
-            for label in sub.split(",")
-            if label.strip()
-        }
-    )
-    label_filter = st.sidebar.selectbox("Label", options=["All"] + all_labels)
+    all_labels = sorted({l.strip() for sub in df["label"] for l in str(sub).split(',') if l.strip()})
+    label_filter = st.sidebar.selectbox("Label", ["All"] + all_labels)
 
-    # Keyword, highlight, reset
-    if st.sidebar.button("🔄 Clear Filter"):
-        st.session_state.update(
-            {
-                "sentiment_filter": "All",
-                "label_filter": "All",
-                "keyword_input": "",
-                "highlight_words": "",
-            }
-        )
+    if st.sidebar.button("🔄 Clear Filter", key="clr_onm"):
+        st.session_state.update({"onm_kw": "", "onm_hl": ""})
 
-    keyword_input = st.sidebar.text_input(
-        "Kata kunci (\"frasa\" -exclude)", value=st.session_state.get("keyword_input", "")
-    )
-    highlight_input = st.sidebar.text_input(
-        "Highlight Kata", value=st.session_state.get("highlight_words", "")
-    )
+    kw_input = st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)", key="onm_kw")
+    hl_input = st.sidebar.text_input("Highlight Kata", key="onm_hl")
 
-    # === FILTER LOGIC ===
-    filtered = df.copy()
+    # Apply filters
+    filt = df.copy()
     if sentiment_filter != "All":
-        filtered = filtered[filtered["sentiment"].str.lower() == sentiment_filter]
+        filt = filt[filt["sentiment"].str.lower() == sentiment_filter]
     if label_filter != "All":
-        filtered = filtered[
-            filtered["label"].apply(
-                lambda x: label_filter in [s.strip() for s in str(x).split(",")]
-            )
-        ]
+        filt = filt[filt["label"].apply(lambda x: label_filter in [l.strip() for l in str(x).split(',')])]
 
-    # Advanced keyword filter on title & body
-    includes, phrases, excludes = parse_advanced_keywords(keyword_input)
-    if keyword_input:
-        mask_kw = filtered["title"].apply(
-            lambda x: match_advanced(x, includes, phrases, excludes)
-        ) | filtered["body"].apply(lambda x: match_advanced(x, includes, phrases, excludes))
-        filtered = filtered[mask_kw]
+    inc, phr, exc = parse_advanced_keywords(kw_input)
+    if kw_input:
+        mask = filt["title"].apply(lambda x: match_advanced(x, inc, phr, exc)) | filt["body"].apply(lambda x: match_advanced(x, inc, phr, exc))
+        filt = filt[mask]
 
-    # === SUMMARY TABLE ===
-    def best_link(sub):
-        for tier in ["Tier 1", "Tier 2", "Tier 3", "-", ""]:
-            link = sub[sub["tier"] == tier]["url"]
-            if not link.empty:
-                return link.iloc[0]
+    # Aggregate per title
+    def best_link(sub_df):
+        for t in ["Tier 1", "Tier 2", "Tier 3", "-", ""]:
+            sel = sub_df[sub_df["tier"] == t]["url"]
+            if not sel.empty:
+                return sel.iloc[0]
         return "-"
 
     grouped = (
-        filtered.groupby("title")
+        filt.groupby("title")
         .agg(
-            Article=("title", "count"),
-            Sentiment=("sentiment", lambda x: x.mode().iloc[0] if not x.mode().empty else "-"),
-            Link=("title", lambda x: best_link(filtered[filtered["title"] == x.iloc[0]])),
+            Jumlah=("title", "count"),
+            Sentimen=("sentiment", lambda x: x.mode().iloc[0] if not x.mode().empty else "-"),
+            Link=("title", lambda x: best_link(filt[filt["title"] == x.iloc[0]])),
         )
         .reset_index()
-        .sort_values(by="Article", ascending=False)
+        .sort_values("Jumlah", ascending=False)
     )
+    grouped["Sentimen"] = grouped["Sentimen"].apply(sentiment_badge)
 
-    grouped["Sentiment"] = grouped["Sentiment"].apply(sentiment_badge)
+    # Highlight
+    hl_set = {h.strip('"').lower() for h in re.findall(r'"[^"]+"|\S+', hl_input)}
+    def highlight(text):
+        for w in hl_set:
+            text = re.sub(f"(?i)({re.escape(w)})", r"<mark>\1</mark>", text)
+        return text
+    grouped["title"] = grouped["title"].apply(highlight)
 
-    # === DISPLAY ===
+    # Display
     col1, col2 = st.columns([0.7, 0.3])
-
     with col1:
         st.markdown("### 📊 Ringkasan Topik (ONM)")
         st.markdown("<div style='overflow-x:auto;'>", unsafe_allow_html=True)
         st.write(grouped.to_html(escape=False, index=False), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
-
     with col2:
         if st.checkbox("Tampilkan WordCloud", key="wc_onm"):
-            wc_data = build_word_freq(
-                filtered["title"].astype(str) + " " + filtered["body"].astype(str)
-            )
-            wc_df = pd.DataFrame(wc_data, columns=["Kata", "Jumlah"])
+            wc_df = pd.DataFrame(build_word_freq(filt["title"] + " " + filt["body"]), columns=["Kata", "Jumlah"])
             st.dataframe(wc_df, use_container_width=True)
 
 
-# =============================
-# 📊  SOCIAL MEDIA IMPLEMENTATION
-# =============================
+# ======================================
+# 📊  SOCIAL MEDIA DASHBOARD
+# ======================================
 
 def run_sosmed_dashboard(df: pd.DataFrame):
-    """New behaviour — assumed columns: content, post_type, original_id, reply_to_original_id,
-    final_sentiment, label, specific_resource, object_group."""
+    """Dashboard for social‑media datasets. Required cols: content, post_type, final_sentiment."""
 
-    # Normalise column names (allow any capitalisation)
+    # Normalise column names to lowercase
     df.columns = [c.lower() for c in df.columns]
 
-    # BASIC CLEANUP
-    df["content"] = df["content"].astype(str)
-    df["label"] = df.get("label", "").fillna("")
+    # Ensure presence of optional columns
+    optional_defaults = {
+        "specific_resource": "",
+        "label": "",
+        "object_group": "",
+        "reply_to_original_id": pd.NA,
+        "original_id": pd.NA,
+    }
+    for col, default in optional_defaults.items():
+        if col not in df.columns:
+            df[col] = default
 
-    # ===== SIDEBAR — FILTER SECTION =====
+    # Basic cleanup
+    df["content"] = df["content"].astype(str)
+    df["label"].fillna("", inplace=True)
+
     st.sidebar.markdown("## 🎛️ Filter — Sosmed")
 
-    # 1️⃣ Conversation type selector
-    conv_option = st.sidebar.radio(
-        "Conversation Scope",
-        ("All", "Tanpa Comment", "Tanpa Post"),
-        index=0,
-        help="Pilih cara perhitungan nilai untuk postingan dan comment.",
-    )
+    # 1️⃣ Conversation scope
+    conv_scope = st.sidebar.radio("Conversation Scope", ("All", "Tanpa Comment", "Tanpa Post"), index=0)
 
-    # 2️⃣ Platform filter
-    platforms = sorted(df["specific_resource"].dropna().unique())
-    platform_filter = st.sidebar.multiselect(
-        "Platform", options=platforms, default=platforms, help="Saring berdasarkan platform."
-    )
+    # 2️⃣ Platform filter (if column exists)
+    platforms = sorted([p for p in df["specific_resource"].dropna().unique() if str(p).strip()])
+    platform_sel = st.sidebar.multiselect("Platform", platforms, default=platforms) if platforms else []
 
-    # 3️⃣ Sentiment filter
+    # 3️⃣ Sentiment
     sentiments_all = sorted(df["final_sentiment"].dropna().str.lower().unique())
-    sentiment_filter = st.sidebar.selectbox("Sentimen", ["All"] + sentiments_all)
+    sent_sel = st.sidebar.selectbox("Sentimen", ["All"] + sentiments_all)
 
-    # 4️⃣ Label filter
-    all_labels = sorted(
-        {
-            l.strip()
-            for sub in df["label"].astype(str)
-            for l in sub.split(",")
-            if l.strip()
-        }
-    )
-    label_filter = st.sidebar.selectbox("Label", ["All"] + all_labels)
+    # 4️⃣ Label
+    all_labels = sorted({l.strip() for sub in df["label"] for l in str(sub).split(',') if l.strip()})
+    lbl_sel = st.sidebar.selectbox("Label", ["All"] + all_labels)
 
-    # 5️⃣ Group filter
-    all_groups = sorted(df["object_group"].dropna().unique())
-    group_filter = st.sidebar.selectbox("Group (object_group)", ["All"] + all_groups)
+    # 5️⃣ Group
+    groups = sorted([g for g in df["object_group"].dropna().unique() if str(g).strip()])
+    grp_sel = st.sidebar.selectbox("Group (object_group)", ["All"] + groups) if groups else "All"
 
-    # 6️⃣ Keywords & highlight
-    if st.sidebar.button("🔄 Clear Filter", key="clear_sosmed"):
-        st.session_state.update(
-            {
-                "sos_kw": "",
-                "sos_hl": "",
-                "sos_dynamic_wc": True,
-            }
-        )
+    # 6️⃣ Keywords / highlight
+    if st.sidebar.button("🔄 Clear Filter", key="clr_soc"):
+        st.session_state.update({"soc_kw": "", "soc_hl": "", "soc_wc_dyn": True})
+    kw_input = st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)", key="soc_kw")
+    hl_input = st.sidebar.text_input("Highlight Kata", key="soc_hl")
 
-    kw_input = st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)", key="sos_kw")
-    hl_input = st.sidebar.text_input("Highlight Kata", key="sos_hl")
+    show_wc = st.sidebar.checkbox("Tampilkan WordCloud", key="soc_wc_show", value=True)
+    dyn_wc = st.sidebar.checkbox("Word Cloud Dinamis", key="soc_wc_dyn", value=True)
 
-    show_wc = st.sidebar.checkbox("Tampilkan WordCloud", key="sos_show_wc", value=True)
-    dynamic_wc = st.sidebar.checkbox(
-        "Word Cloud Dinamis", key="sos_dynamic_wc", value=True
-    )
-
-    # ===== APPLY FILTERS =====
+    # ------- APPLY FILTERS -------
     filt = df.copy()
-    if platform_filter:
-        filt = filt[filt["specific_resource"].isin(platform_filter)]
-    if sentiment_filter != "All":
-        filt = filt[filt["final_sentiment"].str.lower() == sentiment_filter]
-    if label_filter != "All":
-        filt = filt[
-            filt["label"].apply(lambda x: label_filter in [s.strip() for s in str(x).split(",")])
-        ]
-    if group_filter != "All":
-        filt = filt[filt["object_group"] == group_filter]
+    if platform_sel:
+        filt = filt[filt["specific_resource"].isin(platform_sel)]
+    if sent_sel != "All":
+        filt = filt[filt["final_sentiment"].str.lower() == sent_sel]
+    if lbl_sel != "All":
+        filt = filt[filt["label"].apply(lambda x: lbl_sel in [l.strip() for l in str(x).split(',')])]
+    if grp_sel != "All":
+        filt = filt[filt["object_group"] == grp_sel]
 
-    # Keyword search across content
     inc, phr, exc = parse_advanced_keywords(kw_input)
     if kw_input:
         filt = filt[filt["content"].apply(lambda x: match_advanced(x, inc, phr, exc))]
 
-    # ===== CONVERSATION SCOPE HANDLING =====
-    # Identify comment rows (reply_to_original_id has value, regardless of post_type)
+    # Identify comment / post rows
     is_comment = filt["reply_to_original_id"].notna()
     is_post = filt["post_type"].str.lower() == "post_made"
 
-    if conv_option == "Tanpa Comment":
+    if conv_scope == "Tanpa Comment":
         filt = filt[~is_comment]
-    elif conv_option == "Tanpa Post":
+    elif conv_scope == "Tanpa Post":
         filt = filt[~is_post]
 
-    # ===== AGGREGATION LOGIC =====
-    # Pre‑compute comment counts & majority sentiment for each original_id
+    # ------- VALUE & SENTIMENT CALCULATION -------
     comments = filt[is_comment]
-    comment_counts = comments.groupby("reply_to_original_id").size()
-    comment_sent_mode = (
-        comments.groupby("reply_to_original_id")["final_sentiment"]
-        .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else None)
-    )
+    comment_cnt = comments.groupby("reply_to_original_id").size()
+    comment_sent_mode = comments.groupby("reply_to_original_id")["final_sentiment"].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else None)
 
-    # Prepare a dataframe for post rows with derived count & sentiment
     posts = filt[is_post].copy()
-    if not posts.empty:
-        posts["value"] = posts["original_id"].map(comment_counts).fillna(0).astype(int)
-        posts["sentiment_calc"] = posts["original_id"].map(comment_sent_mode)
-        posts["sentiment_final"] = posts["sentiment_calc"].fillna(posts["final_sentiment"])
-    else:
-        posts = pd.DataFrame(columns=filt.columns.tolist() + ["value", "sentiment_final"])
+    posts["value"] = posts["original_id"].map(comment_cnt).fillna(0).astype(int)
+    posts["sentiment_final"] = posts["original_id"].map(comment_sent_mode).fillna(posts["final_sentiment"])
 
-    # TALK / other rows (non‑post)
     talk = filt[~is_post].copy()
-    talk["value"] = 1  # each row counts as 1 occurrence
+    talk["value"] = 1
     talk["sentiment_final"] = talk["final_sentiment"]
 
-    # Combine for summary depending on conversation scope
-    if conv_option == "Tanpa Post":
-        summary_source = talk
-    elif conv_option == "Tanpa Comment":
-        summary_source = pd.concat([talk, posts], ignore_index=True)
-    else:  # All
-        summary_source = pd.concat([filt.assign(value=1), posts], ignore_index=True)
+    if conv_scope == "Tanpa Post":
+        base = talk
+    elif conv_scope == "Tanpa Comment":
+        base = pd.concat([talk, posts], ignore_index=True)
+    else:
+        base = pd.concat([filt.assign(value=1), posts], ignore_index=True)
 
-    # GROUP BY CONTENT FOR SUMMARY TABLE
+    # ------- SUMMARY TABLE -------
     summary = (
-        summary_source.groupby("content")
+        base.groupby("content")
         .agg(
             Total=("value", "sum"),
             Sentiment=("sentiment_final", lambda x: x.mode().iloc[0] if not x.mode().empty else "-"),
-            Platform=("specific_resource", lambda x: ",".join(sorted(set(x.dropna())))),
+            Platform=("specific_resource", lambda x: ",".join(sorted({p for p in x.dropna() if str(p).strip()}))),
             Label=("label", lambda x: ",".join(sorted({l.strip() for s in x for l in str(s).split(',') if l.strip()}))),
-            Group=("object_group", lambda x: ",".join(sorted(set(x.dropna())))),
+            Group=("object_group", lambda x: ",".join(sorted({g for g in x.dropna() if str(g).strip()}))),
         )
         .reset_index()
-        .sort_values(by="Total", ascending=False)
+        .sort_values("Total", ascending=False)
     )
 
-    # ===== HIGHLIGHT KEYWORDS =====
-    highlight_tokens = re.findall(r'"[^"]+"|\S+', hl_input)
-    highlight_set = {t.strip('"').lower() for t in highlight_tokens if t}
-
-    def highlighter(text):
-        for w in highlight_set:
+    # Highlight
+    hl_set = {h.strip('"').lower() for h in re.findall(r'"[^"]+"|\S+', hl_input)}
+    def high(text):
+        for w in hl_set:
             text = re.sub(f"(?i)({re.escape(w)})", r"<mark>\1</mark>", text)
         return text
-
-    summary["content"] = summary["content"].apply(highlighter)
+    summary["content"] = summary["content"].apply(high)
     summary["Sentiment"] = summary["Sentiment"].apply(sentiment_badge)
 
-    # ===== DISPLAY =====
+    # ------- DISPLAY -------
     col1, col2 = st.columns([0.7, 0.3])
-
     with col1:
         st.markdown("### 📊 Ringkasan Topik (Sosmed)")
-        st.caption(
-            f"Dataset: {len(filt):,} row | Summary: {len(summary):,} baris | Filter mode: {conv_option}"
-        )
+        st.caption(f"Dataset: {len(filt):,} row | Summary: {len(summary):,} baris | Mode: {conv_scope}")
         st.markdown("<div style='overflow-x:auto;'>", unsafe_allow_html=True)
         st.write(summary.to_html(escape=False, index=False), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
-
     with col2:
         if show_wc:
-            wc_source = summary_source if dynamic_wc else df
-            wc_data = build_word_freq(wc_source["content"].astype(str))
-            wc_df = pd.DataFrame(wc_data, columns=["Kata", "Jumlah"])
+            wc_source = base if dyn_wc else df
+            wc_df = pd.DataFrame(build_word_freq(wc_source["content"], 500), columns=["Kata", "Jumlah"])
             st.markdown("### ☁️  Word Cloud (Top 500)")
             st.dataframe(wc_df, use_container_width=True)
 
 
-# =============================
-# 🚀  ENTRY POINT
-# =============================
+# ======================================
+# 🚀  APP ENTRY POINT
+# ======================================
 
 st.markdown("### 📁 Pilih sumber data")
-input_type = st.radio("Input ZIP via:", ["Upload File", "Link Download"], horizontal=True)
+input_mode = st.radio("Input ZIP via:", ["Upload File", "Link Download"], horizontal=True)
 
 zip_data = None
-if input_type == "Upload File":
-    up_file = st.file_uploader("Unggah file ZIP", type="zip")
-    if up_file:
-        zip_data = up_file
+if input_mode == "Upload File":
+    upfile = st.file_uploader("Unggah file ZIP", type="zip")
+    if upfile:
+        zip_data = upfile
 else:
     zip_url = st.text_input("Masukkan URL file ZIP")
     if st.button("Proceed") and zip_url:
         try:
-            tmp_path = "/tmp/download.zip"
-            urllib.request.urlretrieve(zip_url, tmp_path)
-            zip_data = tmp_path
+            temp_path = "/tmp/download.zip"
+            urllib.request.urlretrieve(zip_url, temp_path)
+            zip_data = temp_path
         except Exception as e:
             st.error(f"❌ Gagal mengunduh: {e}")
 
@@ -436,24 +361,21 @@ if "last_df" not in st.session_state:
 
 if zip_data:
     with st.spinner("📖 Membaca dan memproses data ..."):
-        df_concat = extract_csv_from_zip(zip_data)
-        if not df_concat.empty:
-            st.session_state["last_df"] = df_concat.copy()
-        else:
+        df_all = extract_csv_from_zip(zip_data)
+        if df_all.empty:
             st.error("❌ DataFrame kosong setelah ekstraksi.")
+        else:
+            st.session_state["last_df"] = df_all.copy()
 
 if st.session_state["last_df"] is not None:
     df_loaded = st.session_state["last_df"]
-    if "tier" in [c.lower() for c in df_loaded.columns]:
-        # ONM ROUTE
+    cols_lower = [c.lower() for c in df_loaded.columns]
+    if "tier" in cols_lower:
         run_onm_dashboard(df_loaded.copy())
     else:
-        # SOSMED ROUTE
-        required_cols = {"content", "post_type", "final_sentiment"}
-        if not required_cols.issubset(set([c.lower() for c in df_loaded.columns])):
-            st.error(
-                f"❌ Dataset tidak memiliki kolom wajib sosmed: {', '.join(required_cols)}."
-            )
+        required = {"content", "post_type", "final_sentiment"}
+        if not required.issubset(set(cols_lower)):
+            st.error("❌ Dataset sosmed tidak memiliki kolom wajib: " + ", ".join(sorted(required)))
         else:
             run_sosmed_dashboard(df_loaded.copy())
 else:
