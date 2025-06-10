@@ -1,3 +1,11 @@
+# =========================================================
+#  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
+#  versi 2025-06 – sudah termasuk:
+#    • filter tanggal (sidebar) untuk ONM & Sosmed
+#    • pembersihan URL link (tidak lagi “…streamlit.app/~/+/...”)
+#    • sedikit polesan UI
+# =========================================================
+
 import streamlit as st
 import pandas as pd
 import zipfile
@@ -7,13 +15,33 @@ import textwrap
 from collections import Counter
 
 # ----------------- CONFIG -----------------
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="Topic Summary – ONM & Sosmed",
+                   page_icon="📊",
+                   layout="wide")
 st.title("📰 Topic Summary NoLimit Dashboard — ONM & Sosmed")
+
+# ----------------- EXTRA UTILS -----------------
+def clean_url(u: str) -> str:
+    """Hilangkan quote/kosong & pastikan https://"""
+    u = str(u).strip(" \"'")
+    u = re.sub(r"^https:/([^/])", r"https://\1", u)   # betulkan slash tunggal
+    return u
+
+def find_date_column(df: pd.DataFrame):
+    """Cari kolom tanggal (nama mengandung 'date') yang valid."""
+    for c in df.columns:
+        if re.search(r"date", c, re.I):
+            try:
+                pd.to_datetime(df[c].iloc[0])
+                return c
+            except Exception:
+                continue
+    return None
 
 # ----------------- ZIP LOADER -----------------
 @st.cache_data(show_spinner=False)
 def extract_csv_from_zip(zf):
-    """Return a single DataFrame (all‑string columns) from every *.csv inside a ZIP."""
+    """Return a single DataFrame (all-string columns) from every *.csv inside a ZIP."""
     try:
         with zipfile.ZipFile(zf, "r") as z:
             csv_files = [f for f in z.namelist() if f.endswith(".csv")]
@@ -95,7 +123,12 @@ def run_onm(df: pd.DataFrame):
     df["tier"].fillna("-", inplace=True)
     df["label"].fillna("", inplace=True)
 
-    st.sidebar.markdown("## 🎛️ Filter — ONM")
+    # Tanggal
+    date_col = find_date_column(df)
+    if date_col:
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
+    st.sidebar.markdown("## 🎛️ Filter — ONM")
     stat_box = st.sidebar.empty()
 
     sent_sel = st.sidebar.selectbox(
@@ -103,6 +136,15 @@ def run_onm(df: pd.DataFrame):
     lab_sel = st.sidebar.selectbox(
         "Label", ["All"] + sorted({l.strip() for sub in df["label"]
                                    for l in str(sub).split(',') if l.strip()}))
+
+    # Date range picker
+    if date_col:
+        min_d = df[date_col].min().date()
+        max_d = df[date_col].max().date()
+        d_start, d_end = st.sidebar.date_input("Rentang tanggal",
+                                               (min_d, max_d),
+                                               min_value=min_d,
+                                               max_value=max_d)
 
     if st.sidebar.button("🔄 Clear", key="onm_clear"):
         st.session_state.update(onm_kw="", onm_hl="")
@@ -116,6 +158,8 @@ def run_onm(df: pd.DataFrame):
     if lab_sel != "All":
         mask &= df["label"].apply(
             lambda x: lab_sel in [s.strip() for s in str(x).split(',')])
+    if date_col:
+        mask &= df[date_col].dt.date.between(d_start, d_end)
     inc, phr, exc = parse_advanced_keywords(kw)
     if kw:
         mask &= (df["title"].apply(lambda x: match_advanced(x, inc, phr, exc)) |
@@ -152,7 +196,8 @@ def run_onm(df: pd.DataFrame):
 
     grouped["Sentiment"] = grouped["Sentiment"].apply(badge)
     grouped["Link"] = grouped["Link"].apply(
-        lambda u: f'<a href="{u}" target="_blank">Link</a>' if u and u != "-" else "-")
+        lambda u: f'<a href="{clean_url(u)}" target="_blank">Link</a>'
+        if u and u != "-" else "-")
 
     # Highlight
     hl_set = {h.strip('"').lower() for h in re.findall(r'"[^"]+"|\S+', hl)}
@@ -164,7 +209,7 @@ def run_onm(df: pd.DataFrame):
     # Show table + word cloud
     col1, col2 = st.columns([0.72, 0.28])
     with col1:
-        st.markdown("### 📊 Ringkasan Topik (ONM)")
+        st.markdown("### 📊 Ringkasan Topik (ONM)")
         st.markdown("<div style='overflow-x:auto;'>", unsafe_allow_html=True)
         st.write(grouped.to_html(escape=False, index=False),
                  unsafe_allow_html=True)
@@ -183,8 +228,14 @@ def run_sosmed(df: pd.DataFrame):
     df.columns = [c.lower() for c in df.columns]
     df["content"] = df["content"].astype(str)
     df["final_sentiment"] = df["final_sentiment"].astype(str).str.strip("\"' ")
+    df["link"] = df["link"].apply(clean_url)
 
-    st.sidebar.markdown("## 🎛️ Filter — Sosmed")
+    # Tanggal
+    date_col = find_date_column(df)
+    if date_col:
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
+    st.sidebar.markdown("## 🎛️ Filter — Sosmed")
     stat_box = st.sidebar.empty()
 
     scope = st.sidebar.radio("Conversation",
@@ -197,6 +248,15 @@ def run_sosmed(df: pd.DataFrame):
         "Sentimen",
         ["All"] + sorted(df["final_sentiment"].dropna().str.lower().unique()))
 
+    # Date range picker
+    if date_col:
+        min_d = df[date_col].min().date()
+        max_d = df[date_col].max().date()
+        d_start, d_end = st.sidebar.date_input("Rentang tanggal",
+                                               (min_d, max_d),
+                                               min_value=min_d,
+                                               max_value=max_d)
+
     if st.sidebar.button("🔄 Clear", key="soc_clear"):
         st.session_state.update(soc_kw="", soc_hl="")
     kw = st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)", key="soc_kw")
@@ -208,6 +268,8 @@ def run_sosmed(df: pd.DataFrame):
         mask &= df["specific_resource"].isin(plat_sel)
     if sent_sel != "All":
         mask &= df["final_sentiment"].str.lower() == sent_sel
+    if date_col:
+        mask &= df[date_col].dt.date.between(d_start, d_end)
     inc, phr, exc = parse_advanced_keywords(kw)
     if kw:
         mask &= df["content"].apply(lambda x: match_advanced(x, inc, phr, exc))
@@ -255,7 +317,6 @@ def run_sosmed(df: pd.DataFrame):
     elif scope == "Tanpa Comment":
         base = pd.concat([talk, posts], ignore_index=True)
     else:
-        # All → include every comment (each counts 1)
         comments_all = filt_scope[is_com].copy()
         comments_all["value"] = 1
         comments_all["sent_final"] = comments_all["final_sentiment"]
@@ -268,7 +329,7 @@ def run_sosmed(df: pd.DataFrame):
         df_links = df_links[df_links["link"].astype(str).str.strip() != ""]
         if df_links.empty:
             return "-"
-        return df_links.sort_values("val", ascending=False)["link"].iloc[0]
+        return clean_url(df_links.sort_values("val", ascending=False)["link"].iloc[0])
 
     def shorten(txt, n=120):
         clean = re.sub(r'<.*?>', '', txt)
@@ -302,7 +363,7 @@ def run_sosmed(df: pd.DataFrame):
     # Display
     col1, col2 = st.columns([0.72, 0.28])
     with col1:
-        st.markdown("### 📊 Ringkasan Topik (Sosmed)")
+        st.markdown("### 📊 Ringkasan Topik (Sosmed)")
         st.caption(f"Dataset: {len(filt):,} | Summary: {len(summary):,}")
         st.markdown("<div style='overflow-x:auto;'>", unsafe_allow_html=True)
         st.write(summary.to_html(escape=False, index=False),
@@ -311,7 +372,7 @@ def run_sosmed(df: pd.DataFrame):
         if show_wc:
             wc_df = pd.DataFrame(
                 word_freq(base["content"], 500), columns=["Kata", "Jumlah"])
-            st.markdown("### ☁️ Word Cloud (Top 500)")
+            st.markdown("### ☁️ Word Cloud (Top 500)")
             st.dataframe(wc_df, use_container_width=True)
 
 # ----------------- ENTRY -----------------
@@ -352,7 +413,7 @@ if st.session_state["last_df"] is not None:
     if "tier" in cols_lower:                       # Assume ONM
         run_onm(df_loaded.copy())
     elif {"content", "post_type", "final_sentiment"}.issubset(cols_lower):
-        run_sosmed(df_loaded.copy())                # Assume Sosmed
+        run_sosmed(df_loaded.copy())               # Assume Sosmed
     else:
         st.error("❌ Struktur kolom tidak cocok format ONM maupun Sosmed.")
 else:
