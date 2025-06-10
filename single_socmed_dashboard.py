@@ -14,8 +14,47 @@ st.title("📰 Topic Summary NoLimit Dashboard — ONM & Sosmed")
 
 
 # ======================================
-# 📦  DATA INGESTION LAYER
+# 📦  DATA INGESTION LAYER (optimized)
 # ======================================
+
+@st.cache_data(show_spinner=False)
+def extract_csv_from_zip(zip_file):
+    """Extract *.csv inside ZIP → concatenated DataFrame (string columns stay string)."""
+    try:
+        with zipfile.ZipFile(zip_file, "r") as z:
+            csv_files = [f for f in z.namelist() if f.endswith(".csv")]
+            if not csv_files:
+                st.error("❌ Tidak ada file .csv di dalam ZIP.")
+                return pd.DataFrame()
+
+            dfs = []
+            for fn in csv_files:
+                try:
+                    with z.open(fn) as fh:
+                        part = pd.read_csv(
+                            fh,
+                            delimiter=";",
+                            quotechar='"',
+                            on_bad_lines="skip",
+                            engine="python",
+                            dtype=str,  # keep everything as string → lighter memory & avoid inference
+                        )
+                        dfs.append(part)
+                except Exception as e:
+                    st.warning(f"⚠️  Gagal membaca {fn}: {e}")
+            return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    except zipfile.BadZipFile:
+        st.error("❌ File yang di‑upload bukan ZIP yang valid.")
+        return pd.DataFrame()
+
+# Helper: drop unused columns early (memory‑saving)
+
+def trim_columns(df: pd.DataFrame, needed_cols: set):
+    present = [c for c in df.columns if c.lower() in needed_cols]
+    missing = needed_cols - {c.lower() for c in present}
+    for m in missing:
+        df[m] = ""  # create empty so downstream code works
+    return df[present + list(missing)]
 
 @st.cache_data(show_spinner=False)
 def extract_csv_from_zip(zip_file):
