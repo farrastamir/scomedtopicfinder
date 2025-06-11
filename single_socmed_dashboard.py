@@ -1,443 +1,282 @@
 # =========================================================
 #  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
-#  versi 2025-06 – dengan filter tanggal robust & fitur tambahan
+#  versi 2025-06-11 ― dengan parser tanggal custom
 # =========================================================
 
 import streamlit as st
 import pandas as pd
-import zipfile
-import urllib.request
-import re
-import textwrap
-import datetime
+import zipfile, urllib.request, re, textwrap
 from collections import Counter
 
 # ----------------- CONFIG -----------------
-st.set_page_config(page_title="Topic Summary – ONM & Sosmed",
-                   page_icon="📊",
-                   layout="wide")
+st.set_page_config("Topic Summary – ONM & Sosmed", "📊", layout="wide")
 st.title("📰 Topic Summary NoLimit Dashboard — ONM & Sosmed")
 
-# ----------------- EXTRA UTILS -----------------
+# ----------------- UTIL: URL & PLATFORM -----------------
 def clean_url(u: str) -> str:
     u = str(u).strip(" \"'")
-    u = re.sub(r"^https:/([^/])", r"https://\1", u)   # betulkan slash tunggal
-    return u
+    return re.sub(r"^https:/([^/])", r"https://\1", u)
 
 PLATFORM_COLOR = {
-    "youtube":   "#FF0000",
-    "tiktok":    "#000000",
-    "instagram": "#C13584",
-    "twitter":   "#1DA1F2",
-    "x":         "#1DA1F2",
-    "facebook":  "#1877F2",
+    "youtube": "#FF0000", "tiktok": "#000000",
+    "instagram": "#C13584", "twitter": "#1DA1F2",
+    "x": "#1DA1F2", "facebook": "#1877F2",
 }
-def platform_from_url(url: str) -> str:
+def platform_from_url(url: str):
     m = re.search(r"https?://(?:www\.)?([^/]+)/", str(url).lower())
     dom = m.group(1) if m else ""
-    for key, col in PLATFORM_COLOR.items():
-        if key in dom:
-            return f'<span style="color:{col};font-weight:bold">{key.capitalize()}</span>'
+    for k,c in PLATFORM_COLOR.items():
+        if k in dom:
+            return f'<span style="color:{c};font-weight:bold">{k.capitalize()}</span>'
     return "-"
 
-def find_date_column(df: pd.DataFrame):
-    for c in df.columns:
-        if re.search(r"date", c, re.I):
-            try:
-                pd.to_datetime(df[c].dropna().iloc[0])
-                return c
-            except Exception:
-                continue
+# ----------------- UTIL: PARSE STRING → DATETIME -----------------
+def parse_dates_series(s: pd.Series) -> pd.Series:
+    """Parse dd/mm/yyyy hh.mm.ss **atau** dd/mm/yy hh.mm menjadi datetime."""
+    def clean_one(x: str):
+        x = str(x)
+        if " " in x:
+            d,t = x.split(" ",1)
+            t = t.replace(".",":")
+            x = f"{d} {t}"
+        return x
+    cleaned = s.astype(str).map(clean_one)
+    return pd.to_datetime(cleaned, dayfirst=True, errors="coerce")
+
+def get_date_column(df: pd.DataFrame, prefer: list[str]) -> str|None:
+    """Temukan kolom tanggal dan ubah ke dtype datetime."""
+    for col in prefer:
+        if col in df.columns:
+            df[col] = parse_dates_series(df[col])
+            return col
+    for col in df.columns:
+        if re.search(r"date", col, re.I):
+            df[col] = parse_dates_series(df[col])
+            return col
     return None
 
-# ----------------- ZIP LOADER -----------------
+# ----------------- UTIL: ZIP LOADER -----------------
 @st.cache_data(show_spinner=False)
-def extract_csv_from_zip(zf):
+def extract_csv_from_zip(zfile):
     try:
-        with zipfile.ZipFile(zf, "r") as z:
-            csv_files = [f for f in z.namelist() if f.endswith(".csv")]
-            if not csv_files:
-                st.error("❌ ZIP tidak berisi file .csv.")
+        with zipfile.ZipFile(zfile) as z:
+            csvs=[f for f in z.namelist() if f.endswith(".csv")]
+            if not csvs:
+                st.error("❌ ZIP tidak memuat CSV.")
                 return pd.DataFrame()
-            dfs = []
-            for fn in csv_files:
-                with z.open(fn) as fh:
-                    dfs.append(pd.read_csv(
-                        fh, delimiter=";", quotechar='"',
-                        engine="python", on_bad_lines="skip", dtype=str))
+            dfs=[pd.read_csv(z.open(f), delimiter=";", quotechar='"',
+                             engine="python", on_bad_lines="skip", dtype=str)
+                 for f in csvs]
             return pd.concat(dfs, ignore_index=True)
     except zipfile.BadZipFile:
-        st.error("❌ ZIP tidak valid.")
+        st.error("❌ ZIP rusak / bukan file ZIP.")
         return pd.DataFrame()
 
-def trim_columns(df: pd.DataFrame, cols_needed: set):
-    keep = [c for c in df.columns if c.lower() in cols_needed]
-    missing = cols_needed - {c.lower() for c in keep}
-    for m in missing:
-        df[m] = ""
-    return df[keep + list(missing)]
+# ----------------- UTIL: TEXT / WORD FREQ -----------------
+STOPWORDS=set(pd.read_csv(
+    "https://raw.githubusercontent.com/stopwords-iso/stopwords-id/master/stopwords-id.txt",
+    header=None)[0].tolist())
+def word_freq(s: pd.Series, top=500):
+    toks=re.findall(r"\b\w{3,}\b", " ".join(s).lower())
+    toks=[t for t in toks if t not in STOPWORDS]
+    return Counter(toks).most_common(top)
 
-# ----------------- KEYWORD UTILS -----------------
-def parse_advanced_keywords(q: str):
-    q = q.strip()
-    if not q:
-        return [], [], []
-    inc, phr, exc = [], [], []
+def badge(s):
+    clr={"positive":"green","negative":"red","neutral":"gray"}.get(str(s).lower(),"black")
+    return f'<span style="color:{clr};font-weight:bold">{s}</span>'
+
+# ----------------- UTIL: ADV. KEYWORD -----------------
+def parse_advanced_keywords(q):
+    q=q.strip()
+    if not q: return [],[],[]
+    inc,phr,exc=[],[],[]
     for tok in re.findall(r'\"[^\"]+\"|\([^)]+\)|\S+', q):
-        if tok.startswith('"') and tok.endswith('"'):
-            phr.append(tok[1:-1])
-        elif tok.startswith('-'):
-            exc.extend(tok[1:].strip('()').split())
-        elif tok.startswith('(') and tok.endswith(')'):
-            inc.append([w.strip() for w in tok[1:-1].split('OR') if w.strip()])
-        else:
-            inc.append([tok.strip()])
-    return inc, phr, exc
-
-def match_advanced(text: str, inc, phr, exc):
-    low = text.lower()
-    if any(w in low for w in exc):
-        return False
-    if any(p not in low for p in phr):
-        return False
+        if tok.startswith('"'): phr.append(tok[1:-1])
+        elif tok.startswith('-'): exc.extend(tok[1:].strip('()').split())
+        elif tok.startswith('('): inc.append([w.strip() for w in tok[1:-1].split('OR') if w.strip()])
+        else: inc.append([tok.strip()])
+    return inc,phr,exc
+def match_advanced(text, inc, phr, exc):
+    low=text.lower()
+    if any(w in low for w in exc): return False
+    if any(p not in low for p in phr): return False
     return all(any(w in low for w in g) for g in inc)
 
-# ----------------- WORD-CLOUD UTILS -----------------
-@st.cache_data(show_spinner=False)
-def load_stopwords():
-    url = ("https://raw.githubusercontent.com/stopwords-iso/"
-           "stopwords-id/master/stopwords-id.txt")
-    try:
-        return set(pd.read_csv(url, header=None)[0].tolist())
-    except Exception:
-        return set()
-
-STOPWORDS = load_stopwords()
-def word_freq(series: pd.Series, top_n=500):
-    tokens = re.findall(r"\b\w{3,}\b", " ".join(series).lower())
-    tokens = [t for t in tokens if t not in STOPWORDS]
-    return Counter(tokens).most_common(top_n)
-
-# ----------------- SENTIMENT BADGE -----------------
-def badge(val):
-    s = str(val).lower()
-    colors = {"positive": "green", "negative": "red", "neutral": "gray"}
-    return f'<span style="color:{colors.get(s, "black")};font-weight:bold">{s}</span>'
-
-# ----------------- ONM DASHBOARD -----------------
-def run_onm(df: pd.DataFrame):
-    df = trim_columns(df, {"title", "body", "url", "tier",
-                           "sentiment", "label", "date_published"})
-    for col in ["title", "body", "url", "sentiment"]:
-        df[col] = df[col].astype(str).str.strip("'")
-    df["tier"].fillna("-", inplace=True)
-    df["label"].fillna("", inplace=True)
-
-    date_col = "date_published" if "date_published" in df.columns else find_date_column(df)
-    if date_col:
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-        valid_dates = df[date_col].dropna()
-    else:
-        valid_dates = pd.Series(dtype='datetime64[ns]')
-
-    st.sidebar.markdown("## 🎛️ Filter — ONM")
-    stat_box = st.sidebar.empty()
-
-    sent_sel = st.sidebar.selectbox(
-        "Sentimen", ["All"] + sorted(df["sentiment"].str.lower().unique()))
-    lab_sel = st.sidebar.selectbox(
-        "Label", ["All"] + sorted({l.strip() for sub in df["label"]
-                                   for l in str(sub).split(',') if l.strip()}))
-
-    use_date = False
-    if not valid_dates.empty:
-        mode = st.sidebar.radio("Filter tanggal", ["Semua", "Custom"],
-                                horizontal=True, key="onm_date_mode")
-        if mode == "Custom":
-            use_date = True
-            min_d = valid_dates.min().date()
-            max_d = valid_dates.max().date()
-            d_start, d_end = st.sidebar.date_input(
-                "Rentang",
-                (min_d, max_d),
-                min_value=min_d,
-                max_value=max_d,
-                key="onm_date_input")
-    if st.sidebar.button("🔄 Clear", key="onm_clear"):
-        st.session_state.update(onm_kw="", onm_hl="")
-    kw = st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)", key="onm_kw")
-    hl = st.sidebar.text_input("Highlight Kata", key="onm_hl")
-
-    # -------- Filter --------
-    mask = pd.Series(True, index=df.index)
-    if sent_sel != "All":
-        mask &= df["sentiment"].str.lower() == sent_sel
-    if lab_sel != "All":
-        mask &= df["label"].apply(lambda x: lab_sel in
-                                            [s.strip() for s in str(x).split(',')])
-    if use_date and date_col:
-        mask &= df[date_col].dt.date.between(d_start, d_end)
-    inc, phr, exc = parse_advanced_keywords(kw)
-    if kw:
-        mask &= (df["title"].apply(lambda x: match_advanced(x, inc, phr, exc)) |
-                 df["body"].apply(lambda x: match_advanced(x, inc, phr, exc)))
-    filt = df[mask]
-
-    # Sidebar stats
-    sl = filt["sentiment"].str.lower()
-    stat_box.markdown(
-        f"<div style='text-align:center;font-weight:bold;font-size:20px;'>📊 Statistik</div>"
-        f"<div style='font-size:28px;font-weight:bold'>Article: {len(filt):,}</div>"
-        f"<div style='font-size:15px;'>"
-        f"<span style='color:green;'>🟢 {(sl=='positive').sum()}</span> | "
-        f"<span style='color:gray;'>⚪ {(sl=='neutral').sum()}</span> | "
-        f"<span style='color:red;'>🔴 {(sl=='negative').sum()}</span></div>",
-        unsafe_allow_html=True)
-
-    # Link priority
-    rank = {"tier 1": 0, "tier 2": 1, "tier 3": 2, "-": 3, "": 4}
-    def best_link(g):
-        g["rk"] = g["tier"].str.lower().map(rank).fillna(4)
-        g = g.sort_values("rk")
+# ----------------- DASHBOARD: ONM -----------------
+def run_onm(df):
+    df=df.rename(str.lower,axis=1)
+    date_col=get_date_column(df,["date_published"])
+    for c in ["title","body","url","sentiment"]:
+        if c in df: df[c]=df[c].astype(str).str.strip("'")
+    df["tier"]=df.get("tier","-").fillna("-")
+    df["label"]=df.get("label","")
+    
+    st.sidebar.header("🎛️ Filter — ONM")
+    sent_sel=st.sidebar.selectbox("Sentimen",["All"]+sorted(df["sentiment"].str.lower().unique()))
+    lab_sel=st.sidebar.selectbox("Label",["All"]+sorted({l.strip() for sub in df["label"]
+                                                         for l in str(sub).split(',') if l.strip()}))
+    mode=st.sidebar.radio("Filter tanggal",["Semua","Custom"],horizontal=True,key="onm_date_mode")
+    use_date=False; d_start=d_end=None
+    if mode=="Custom":
+        if date_col and not df[date_col].dropna().empty:
+            mind,maxd=df[date_col].min().date(),df[date_col].max().date()
+            d_start,d_end=st.sidebar.date_input("Rentang",(mind,maxd),
+                                                min_value=mind,max_value=maxd,key="onm_date_input")
+            use_date=True
+        else:
+            st.sidebar.info("Tidak ada tanggal valid.")
+    
+    if st.sidebar.button("🔄 Clear",key="onm_clr"): st.session_state.update(onm_kw="",onm_hl="")
+    kw=st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)",key="onm_kw")
+    hl=st.sidebar.text_input("Highlight Kata",key="onm_hl")
+    
+    # filter
+    m=pd.Series(True, df.index)
+    if sent_sel!="All": m &= df["sentiment"].str.lower()==sent_sel
+    if lab_sel!="All": m &= df["label"].apply(lambda x: lab_sel in [s.strip() for s in str(x).split(',')])
+    if use_date and date_col: m &= df[date_col].dt.date.between(d_start,d_end)
+    inc,phr,exc=parse_advanced_keywords(kw)
+    if kw: m &= (df["title"].apply(lambda x:match_advanced(x,inc,phr,exc)) |
+                 df["body"].apply(lambda x:match_advanced(x,inc,phr,exc)))
+    filt=df[m].copy()
+    
+    rank={"tier 1":0,"tier 2":1,"tier 3":2,"-":3,"":4}
+    def best_link(g): g["rk"]=g["tier"].str.lower().map(rank).fillna(4); g=g.sort_values("rk")
+    # noqa: E702
+    # note: we need to return link
         return g["url"].iloc[0] if not g["url"].empty else "-"
+    gpd=(filt.groupby("title",sort=False)
+         .apply(best_link).to_frame("Link")
+         .join(filt.groupby("title").agg(
+             Total=("title","size"),
+             Sentiment=("sentiment",lambda x:x.mode().iloc[0] if not x.mode().empty else "-")))
+         .reset_index().sort_values("Total",ascending=False))
+    gpd["Sentiment"]=gpd["Sentiment"].apply(badge)
+    gpd["Link"]=gpd["Link"].apply(lambda u:f'<a href="{clean_url(u)}" target="_blank">Link</a>' if u!="-"
+                                  else "-")
+    if hl:
+        pattern=re.compile("(?i)("+"|".join(map(re.escape,
+                     [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
+        gpd["title"]=gpd["title"].apply(lambda t: pattern.sub(r"<mark>\1</mark>", t))
+    st.markdown("### 📊 Ringkasan Topik (ONM)")
+    style=(gpd[["title","Total","Sentiment","Link"]]
+           .style.set_properties(subset=["Total","Link"], **{"text-align":"center"})
+           .hide(axis="index"))
+    st.write(style.to_html(escape=False),unsafe_allow_html=True)
 
-    grouped = (filt.groupby("title", sort=False)
-               .apply(best_link).to_frame("Link")
-               .join(filt.groupby("title").agg(
-                     Total=("title", "size"),
-                     Sentiment=("sentiment",
-                                lambda x: x.mode().iloc[0] if not x.mode().empty else "-")),
-                     how="left")
-               .reset_index().sort_values("Total", ascending=False))
-    grouped["Sentiment"] = grouped["Sentiment"].apply(badge)
-    grouped["Link"] = grouped["Link"].apply(
-        lambda u: f'<a href="{clean_url(u)}" target="_blank">Link</a>'
-        if u and u != "-" else "-")
-
-    # Highlight
-    hl_set = {h.strip('"').lower() for h in re.findall(r'"[^"]+"|\S+', hl)}
-    if hl_set:
-        pattern = re.compile(f"(?i)({'|'.join(map(re.escape, hl_set))})")
-        grouped["title"] = grouped["title"].apply(
-            lambda t: pattern.sub(r"<mark>\1</mark>", t))
-
-    # Display
-    col1, col2 = st.columns([0.72, 0.28])
-    with col1:
-        st.markdown("### 📊 Ringkasan Topik (ONM)")
-        style = (grouped[["title", "Total", "Sentiment", "Link"]]
-                 .style.set_properties(subset=["Total", "Link"],
-                                       **{"text-align": "center"})
-                 .hide(axis="index"))
-        st.write(style.to_html(escape=False), unsafe_allow_html=True)
-    with col2:
-        if st.checkbox("WordCloud", key="wc_onm"):
-            wc_df = pd.DataFrame(
-                word_freq(filt["title"] + " " + filt["body"]),
-                columns=["Kata", "Jumlah"])
-            st.dataframe(wc_df, use_container_width=True)
-
-# ----------------- SOSMED DASHBOARD -----------------
-def run_sosmed(df: pd.DataFrame):
-    need = {"content", "post_type", "final_sentiment", "specific_resource",
-            "reply_to_original_id", "original_id", "link", "date_created"}
-    df = trim_columns(df, need)
-    df.columns = [c.lower() for c in df.columns]
-    df["content"] = df["content"].astype(str).str.lstrip("'")  # bersihkan kutip
-    df["final_sentiment"] = df["final_sentiment"].astype(str).str.strip("\"' ")
-    df["link"] = df["link"].apply(clean_url)
-
-    date_col = "date_created" if "date_created" in df.columns else find_date_column(df)
-    if date_col:
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-        valid_dates = df[date_col].dropna()
+# ----------------- DASHBOARD: SOSMED -----------------
+def run_sosmed(df):
+    df=df.rename(str.lower,axis=1)
+    df["content"]=df["content"].astype(str).str.lstrip("'")
+    df["final_sentiment"]=df["final_sentiment"].astype(str).str.strip("\"' ")
+    df["link"]=df["link"].apply(clean_url)
+    date_col=get_date_column(df,["date_created"])
+    
+    st.sidebar.header("🎛️ Filter — Sosmed")
+    scope=st.sidebar.radio("Conversation",("All","Tanpa Comment","Tanpa Post"),index=0)
+    plats=sorted({p for p in df["specific_resource"].dropna() if str(p).strip()})
+    plat_sel=st.sidebar.multiselect("Platform",plats,default=plats) if plats else []
+    sent_sel=st.sidebar.selectbox("Sentimen",
+                                  ["All"]+sorted(df["final_sentiment"].dropna().str.lower().unique()))
+    mode=st.sidebar.radio("Filter tanggal",["Semua","Custom"],horizontal=True,key="soc_date_mode")
+    use_date=False; d_start=d_end=None
+    if mode=="Custom":
+        if date_col and not df[date_col].dropna().empty:
+            mind,maxd=df[date_col].min().date(),df[date_col].max().date()
+            d_start,d_end=st.sidebar.date_input("Rentang",(mind,maxd),
+                                                min_value=mind,max_value=maxd,key="soc_date_input")
+            use_date=True
+        else: st.sidebar.info("Tidak ada tanggal valid.")
+    if st.sidebar.button("🔄 Clear",key="soc_clr"): st.session_state.update(soc_kw="",soc_hl="")
+    kw=st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)",key="soc_kw")
+    hl=st.sidebar.text_input("Highlight Kata",key="soc_hl")
+    show_wc=st.sidebar.checkbox("WordCloud",True,key="soc_wc")
+    
+    mask=pd.Series(True,df.index)
+    if plat_sel: mask &= df["specific_resource"].isin(plat_sel)
+    if sent_sel!="All": mask &= df["final_sentiment"].str.lower()==sent_sel
+    if use_date and date_col: mask &= df[date_col].dt.date.between(d_start,d_end)
+    inc,phr,exc=parse_advanced_keywords(kw)
+    if kw: mask &= df["content"].apply(lambda x: match_advanced(x,inc,phr,exc))
+    filt=df[mask].copy()
+    
+    is_com=filt["reply_to_original_id"].notna()
+    is_post=filt["post_type"].str.lower()=="post_made"
+    if scope=="Tanpa Comment": filt_scope=filt[~is_com]
+    elif scope=="Tanpa Post": filt_scope=filt[~is_post]
+    else: filt_scope=filt
+    comments=filt_scope[is_com]
+    com_cnt=comments.groupby("reply_to_original_id").size()
+    com_sent=comments.groupby("reply_to_original_id")["final_sentiment"].agg(
+        lambda x:x.mode().iloc[0] if not x.mode().empty else None)
+    posts=filt_scope[is_post].copy()
+    posts["value"]=posts["original_id"].map(com_cnt).fillna(0).astype(int)
+    posts["sent_final"]=posts["original_id"].map(com_sent).fillna(posts["final_sentiment"])
+    talk=filt_scope[~is_post].copy(); talk["value"]=1; talk["sent_final"]=talk["final_sentiment"]
+    if scope=="Tanpa Post": base=talk
+    elif scope=="Tanpa Comment": base=pd.concat([talk,posts],ignore_index=True)
     else:
-        valid_dates = pd.Series(dtype='datetime64[ns]')
-
-    st.sidebar.markdown("## 🎛️ Filter — Sosmed")
-    stat_box = st.sidebar.empty()
-
-    scope = st.sidebar.radio("Conversation", ("All", "Tanpa Comment", "Tanpa Post"), index=0)
-    plats = sorted({p for p in df["specific_resource"].dropna() if str(p).strip()})
-    plat_sel = st.sidebar.multiselect("Platform", plats, default=plats) if plats else []
-
-    sent_sel = st.sidebar.selectbox(
-        "Sentimen", ["All"] + sorted(df["final_sentiment"].dropna().str.lower().unique()))
-
-    use_date = False
-    if not valid_dates.empty:
-        mode = st.sidebar.radio("Filter tanggal", ["Semua", "Custom"],
-                                horizontal=True, key="soc_date_mode")
-        if mode == "Custom":
-            use_date = True
-            min_d = valid_dates.min().date()
-            max_d = valid_dates.max().date()
-            d_start, d_end = st.sidebar.date_input(
-                "Rentang",
-                (min_d, max_d),
-                min_value=min_d,
-                max_value=max_d,
-                key="soc_date_input")
-
-    if st.sidebar.button("🔄 Clear", key="soc_clear"):
-        st.session_state.update(soc_kw="", soc_hl="")
-    kw = st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)", key="soc_kw")
-    hl = st.sidebar.text_input("Highlight Kata", key="soc_hl")
-    show_wc = st.sidebar.checkbox("WordCloud", key="soc_wc", value=True)
-
-    # ----- Filtering -----
-    mask = pd.Series(True, index=df.index)
-    if plat_sel:
-        mask &= df["specific_resource"].isin(plat_sel)
-    if sent_sel != "All":
-        mask &= df["final_sentiment"].str.lower() == sent_sel
-    if use_date and date_col:
-        mask &= df[date_col].dt.date.between(d_start, d_end)
-    inc, phr, exc = parse_advanced_keywords(kw)
-    if kw:
-        mask &= df["content"].apply(lambda x: match_advanced(x, inc, phr, exc))
-    filt = df[mask]
-
-    # Sidebar stats
-    sl = filt["final_sentiment"].str.lower()
-    stat_box.markdown(
-        f"<div style='text-align:center;font-weight:bold;font-size:20px;'>📊 Statistik</div>"
-        f"<div style='font-size:28px;font-weight:bold'>Talk: {len(filt):,}</div>"
-        f"<div style='font-size:15px;'>"
-        f"<span style='color:green;'>🟢 {(sl=='positive').sum()}</span> | "
-        f"<span style='color:gray;'>⚪ {(sl=='neutral').sum()}</span> | "
-        f"<span style='color:red;'>🔴 {(sl=='negative').sum()}</span></div>",
-        unsafe_allow_html=True)
-
-    # Scope separation
-    is_com = filt["reply_to_original_id"].notna()
-    is_post = filt["post_type"].str.lower() == "post_made"
-
-    if scope == "Tanpa Comment":
-        filt_scope = filt[~is_com]
-    elif scope == "Tanpa Post":
-        filt_scope = filt[~is_post]
-    else:
-        filt_scope = filt
-
-    # Engagement
-    comments = filt_scope[is_com]
-    com_cnt = comments.groupby("reply_to_original_id").size()
-    com_sent = comments.groupby("reply_to_original_id")["final_sentiment"].agg(
-        lambda x: x.mode().iloc[0] if not x.mode().empty else None)
-
-    posts = filt_scope[is_post].copy()
-    posts["value"] = posts["original_id"].map(com_cnt).fillna(0).astype(int)
-    posts["sent_final"] = posts["original_id"].map(com_sent).fillna(posts["final_sentiment"])
-
-    talk = filt_scope[~is_post].copy()
-    talk["value"] = 1
-    talk["sent_final"] = talk["final_sentiment"]
-
-    if scope == "Tanpa Post":
-        base = talk
-    elif scope == "Tanpa Comment":
-        base = pd.concat([talk, posts], ignore_index=True)
-    else:
-        comments_all = filt_scope[is_com].copy()
-        comments_all["value"] = 1
-        comments_all["sent_final"] = comments_all["final_sentiment"]
-        base = pd.concat([talk, posts, comments_all], ignore_index=True)
-
-    # -------- Summary --------
-    def best_link(series, val_series):
-        df_links = pd.DataFrame({"link": series, "val": val_series}).dropna()
-        df_links = df_links[df_links["link"].astype(str).str.strip() != ""]
-        if df_links.empty:
-            return "-"
-        return clean_url(df_links.sort_values("val", ascending=False)["link"].iloc[0])
-
-    summary = (base.groupby("content", sort=False)
-               .agg(Total=("value", "sum"),
-                    Sentiment=("sent_final", lambda x: x.mode().iloc[0]
-                               if not x.mode().empty else "-"),
-                    LinkSample=("link", lambda x: best_link(x, base.loc[x.index, "value"])))
-               .sort_values("Total", ascending=False)
-               .reset_index())
-
-    summary["Full"] = summary["content"]
-    summary["Short"] = summary["Full"].apply(lambda t: textwrap.shorten(
-        re.sub(r'<.*?>', '', t), width=120, placeholder="…"))
-    summary["Text"] = summary.apply(
-        lambda r: f'<span title="{r.Full}">{r.Short}</span>', axis=1)
-    summary["Sentiment"] = summary["Sentiment"].apply(badge)
-    summary["Link"] = summary["LinkSample"].apply(
-        lambda u: f'<a href="{u}" target="_blank">Link</a>' if u and u != "-" else "-")
-    summary["Platform"] = summary["Link"].apply(
-        lambda html: re.search(r'href="([^"]+)"', html).group(1)
-        if "href" in html else "-"
-    ).apply(platform_from_url)
-
-    summary = summary[["Text", "Total", "Sentiment", "Platform", "Link"]]
-
-    # Highlight
-    hl_set = {h.strip('"').lower() for h in re.findall(r'"[^"]+"|\S+', hl)}
-    if hl_set:
-        pattern = re.compile(f"(?i)({'|'.join(map(re.escape, hl_set))})")
-        summary["Text"] = summary["Text"].apply(
-            lambda t: pattern.sub(r"<mark>\1</mark>", t))
-
-    # ------- Display -------
-    col1, col2 = st.columns([0.72, 0.28])
-    with col1:
-        st.markdown("### 📊 Ringkasan Topik (Sosmed)")
-        st.caption(f"Dataset: {len(filt):,} | Summary: {len(summary):,}")
-        style = (summary.style
-                 .set_properties(subset=["Total", "Link", "Platform"],
-                                 **{"text-align": "center"})
-                 .hide(axis="index"))
-        st.write(style.to_html(escape=False), unsafe_allow_html=True)
-    with col2:
-        if show_wc:
-            wc_df = pd.DataFrame(word_freq(base["content"], 500),
-                                 columns=["Kata", "Jumlah"])
-            st.markdown("### ☁️ Word Cloud (Top 500)")
-            st.dataframe(wc_df, use_container_width=True)
+        cm_all=comments.copy(); cm_all["value"]=1; cm_all["sent_final"]=cm_all["final_sentiment"]
+        base=pd.concat([talk,posts,cm_all],ignore_index=True)
+    
+    def best_link(series,val):
+        d=pd.DataFrame({"link":series,"val":val}).dropna()
+        d=d[d["link"].astype(str).str.strip()!=""]
+        return clean_url(d.sort_values("val",ascending=False)["link"].iloc[0]) if not d.empty else "-"
+    summary=(base.groupby("content",sort=False)
+             .agg(Total=("value","sum"),
+                  Sentiment=("sent_final",lambda x:x.mode().iloc[0] if not x.mode().empty else "-"),
+                  Link=("link",lambda x: best_link(x, base.loc[x.index,"value"])))
+             .sort_values("Total",ascending=False).reset_index())
+    summary["Short"]=summary["content"].apply(lambda t:textwrap.shorten(re.sub(r'<.*?>','',t),120,"…"))
+    summary["Text"]=summary.apply(lambda r:f'<span title="{r.content}">{r.Short}</span>',axis=1)
+    summary["Sentiment"]=summary["Sentiment"].apply(badge)
+    summary["Link"]=summary["Link"].apply(lambda u:f'<a href="{u}" target="_blank">Link</a>' if u!="-"
+                                          else "-")
+    summary["Platform"]=summary["Link"].apply(
+        lambda html: platform_from_url(re.search(r'href="([^"]+)"',html).group(1))
+        if "href" in html else "-")
+    summary=summary[["Text","Total","Sentiment","Platform","Link"]]
+    if hl:
+        pattern=re.compile("(?i)("+"|".join(map(re.escape,
+                     [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
+        summary["Text"]=summary["Text"].apply(lambda t: pattern.sub(r"<mark>\1</mark>", t))
+    st.markdown("### 📊 Ringkasan Topik (Sosmed)")
+    st.caption(f"Dataset: {len(filt):,} | Summary: {len(summary):,}")
+    style=(summary.style.set_properties(subset=["Total","Link","Platform"],
+                                        **{"text-align":"center"})
+                     .hide(axis="index"))
+    st.write(style.to_html(escape=False),unsafe_allow_html=True)
+    if show_wc:
+        wc_df=pd.DataFrame(word_freq(base["content"],500),columns=["Kata","Jumlah"])
+        st.markdown("### ☁️ Word Cloud (Top 500)")
+        st.dataframe(wc_df,use_container_width=True)
 
 # ----------------- ENTRY -----------------
 st.markdown("### 📁 Pilih sumber data")
-inp_mode = st.radio("Input ZIP via:", ["Upload File", "Link Download"],
-                    horizontal=True)
-
-zip_data = None
-if inp_mode == "Upload File":
-    up = st.file_uploader("Unggah file ZIP", type="zip")
-    if up:
-        zip_data = up
+mode=st.radio("Input ZIP via:",["Upload File","Link Download"],horizontal=True)
+zip_data=None
+if mode=="Upload File":
+    up=st.file_uploader("Unggah ZIP",type="zip")
+    if up: zip_data=up
 else:
-    url = st.text_input("Masukkan URL ZIP")
+    url=st.text_input("URL ZIP")
     if st.button("Proceed") and url:
-        try:
-            tmp = "/tmp/data.zip"
-            urllib.request.urlretrieve(url, tmp)
-            zip_data = tmp
-        except Exception as e:
-            st.error(f"❌ Gagal mengunduh: {e}")
+        tmp="/tmp/data.zip"
+        try: urllib.request.urlretrieve(url,tmp); zip_data=tmp
+        except Exception as e: st.error(f"❌ Gagal unduh: {e}")
 
-if "last_df" not in st.session_state:
-    st.session_state["last_df"] = None
-
+if "df" not in st.session_state: st.session_state.df=None
 if zip_data:
-    with st.spinner("📖 Memproses data …"):
-        df_all = extract_csv_from_zip(zip_data)
-        if df_all.empty:
-            st.error("❌ DataFrame kosong / gagal dibaca.")
-        else:
-            st.session_state["last_df"] = df_all.copy()
+    with st.spinner("📖 Membaca data…"):
+        df_all=extract_csv_from_zip(zip_data)
+        if not df_all.empty: st.session_state.df=df_all.copy()
 
-if st.session_state["last_df"] is not None:
-    df_loaded = st.session_state["last_df"]
-    cols_lower = [c.lower() for c in df_loaded.columns]
-    if "tier" in cols_lower:
-        run_onm(df_loaded.copy())
-    elif {"content", "post_type", "final_sentiment"}.issubset(cols_lower):
-        run_sosmed(df_loaded.copy())
-    else:
-        st.error("❌ Struktur kolom tidak cocok format ONM maupun Sosmed.")
+if st.session_state.df is not None:
+    df=st.session_state.df
+    cols={c.lower() for c in df.columns}
+    if "tier" in cols: run_onm(df.copy())
+    elif {"content","post_type","final_sentiment"}.issubset(cols): run_sosmed(df.copy())
+    else: st.error("❌ Struktur kolom tidak cocok ONM atau Sosmed.")
 else:
-    st.info("Unggah atau tautkan ZIP untuk memulai.")
+    st.info("Unggah / tautkan ZIP terlebih dahulu.")
