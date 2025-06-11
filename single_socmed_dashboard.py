@@ -210,7 +210,7 @@ def run_sosmed(df):
 
     st.sidebar.header("🎛️ Filter — Sosmed")
     scope = st.sidebar.radio("Conversation", ("All", "Tanpa Comment", "Tanpa Post"), index=0)
-    plats = sorted({p for p in df["specific_resource"].dropna() if str(p).strip()})
+    plats = sorted({p for p in df["specific_resource_type"].dropna() if str(p).strip()})
     plat_sel = st.sidebar.multiselect("Platform", plats, default=plats) if plats else []
     sent_sel = st.sidebar.selectbox("Sentimen",
                                     ["All"] + sorted(df["final_sentiment"].dropna().str.lower().unique()))
@@ -239,7 +239,7 @@ def run_sosmed(df):
     # filtering
     m = pd.Series(True, df.index)
     if plat_sel:
-        m &= df["specific_resource"].isin(plat_sel)
+        m &= df["specific_resource_type"].isin(plat_sel)
     if sent_sel != "All":
         m &= df["final_sentiment"].str.lower() == sent_sel
     if use_date and date_col:
