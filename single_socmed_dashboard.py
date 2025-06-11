@@ -1,6 +1,6 @@
 # =========================================================
 #  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
-#  2025-06-12  –  safe_shorten fix
+#  2025-06-12  –  safe_shorten fix + sidebar stats box
 # =========================================================
 
 import streamlit as st, pandas as pd, re, textwrap, zipfile, urllib.request
@@ -115,6 +115,9 @@ def run_onm(df):
     df["tier"]=df["tier"].fillna("-"); df["label"]=df["label"].fillna("")
 
     st.sidebar.header("🎛️ Filter — ONM")
+    # ▸ kotak statistik di paling atas
+    stats_box = st.sidebar.empty()
+
     sent_sel=st.sidebar.selectbox("Sentimen",["All"]+sorted(df["sentiment"].str.lower().unique()))
     lab_sel=st.sidebar.selectbox("Label",["All"]+sorted({l.strip() for sub in df["label"]
                                                          for l in str(sub).split(',') if l.strip()}))
@@ -129,6 +132,7 @@ def run_onm(df):
     kw=st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)",key="onm_kw")
     hl=st.sidebar.text_input("Highlight Kata",key="onm_hl")
 
+    # apply filter
     m=pd.Series(True,df.index)
     if sent_sel!="All": m &= df["sentiment"].str.lower()==sent_sel
     if lab_sel!="All": m &= df["label"].apply(lambda x: lab_sel in [s.strip() for s in str(x).split(',')])
@@ -138,6 +142,22 @@ def run_onm(df):
                  df["body"].apply(lambda x: match(x,inc,phr,exc)))
     filt=df[m]
 
+    # ---------- sidebar stats ----------
+    sl=filt["sentiment"].str.lower()
+    total_artikel=len(filt)
+    stats_box.markdown(f"""
+    <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
+        <span style='font-size:24px'>📊</span>
+        <span style='font-size:26px;font-weight:bold'>{total_artikel:,} Article</span>
+    </div>
+    <div style='font-size:15px;'>
+        <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span>&nbsp;|&nbsp;
+        <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span>&nbsp;|&nbsp;
+        <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ringkasan
     rank={"tier 1":0,"tier 2":1,"tier 3":2,"-":3,"":4}
     def best_link(g):
         g=g.copy(); g["rk"]=g["tier"].str.lower().map(rank).fillna(4); g=g.sort_values("rk")
@@ -170,6 +190,9 @@ def run_sosmed(df):
     plat_col="specific_resource_type" if df["specific_resource_type"].str.strip().any() else "specific_resource"
 
     st.sidebar.header("🎛️ Filter — Sosmed")
+    # ▸ kotak statistik di paling atas
+    stats_box = st.sidebar.empty()
+
     scope=st.sidebar.radio("Conversation",("All","Tanpa Comment","Tanpa Post"),index=0)
 
     plat_values=sorted({p for p in df[plat_col].dropna() if str(p).strip()})
@@ -195,6 +218,7 @@ def run_sosmed(df):
     hl=st.sidebar.text_input("Highlight Kata",key="soc_hl")
     show_wc=st.sidebar.checkbox("WordCloud",True,key="soc_wc")
 
+    # apply filter
     m=pd.Series(True,df.index)
     if sel_plat: m &= df[plat_col].isin(sel_plat)
     if sent_sel!="All": m &= df["final_sentiment"].str.lower()==sent_sel
@@ -203,15 +227,20 @@ def run_sosmed(df):
     if kw: m &= df["content"].apply(lambda x: match(x,inc,phr,exc))
     filt=df[m]
 
-    # sidebar stats
+    # ---------- sidebar stats ----------
     sl=filt["final_sentiment"].str.lower()
-    st.sidebar.markdown(
-        f"<div style='text-align:center;font-weight:bold;font-size:20px;'>📊 Statistik</div>"
-        f"<div style='font-size:28px;font-weight:bold'>Talk: {len(filt):,}</div>"
-        f"<div style='font-size:15px;'>"
-        f"<span style='color:green;'>🟢 {(sl=='positive').sum()}</span> | "
-        f"<span style='color:gray;'>⚪ {(sl=='neutral').sum()}</span> | "
-        f"<span style='color:red;'>🔴 {(sl=='negative').sum()}</span></div>", unsafe_allow_html=True)
+    total_talk=len(filt)
+    stats_box.markdown(f"""
+    <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
+        <span style='font-size:24px'>📊</span>
+        <span style='font-size:26px;font-weight:bold'>{total_talk:,} Percakapan</span>
+    </div>
+    <div style='font-size:15px;'>
+        <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span>&nbsp;|&nbsp;
+        <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span>&nbsp;|&nbsp;
+        <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
+    </div>
+    """, unsafe_allow_html=True)
 
     # scope breakdown
     is_com=filt["reply_to_original_id"].notna()
