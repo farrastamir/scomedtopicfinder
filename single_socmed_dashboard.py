@@ -1,10 +1,10 @@
 # =========================================================
 #  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
-#  2025-06-13  —  + Prompt-Template Copy Button
+#  2025-06-13  —  + Prompt-Template Copy Button (hidetext)
 # =========================================================
 
 import streamlit as st, pandas as pd, re, textwrap, zipfile, urllib.request
-import streamlit.components.v1 as components   # ⬅️ butuh untuk tombol-clipboard
+import streamlit.components.v1 as components          # ⬅️ clipboard-button
 from collections import Counter, defaultdict
 
 # ---------- CONFIG ----------
@@ -123,34 +123,34 @@ def safe_shorten(txt, width=120):
     except Exception:
         return str(txt)[:width] + "…"
 
-# ---------- PROMPT-TEMPLATE UTIL ---------------------------------------------
+# ---------- PROMPT-TEMPLATE UTIL (dengan 1 tombol Copy) ----------
 def generate_template(client: str, rows: list[str], mode: str) -> str:
     client = client or "[Client]"
     if mode == "sosmed":
         header = (f"Anda adalah seorang data analyst yang bergerak di bidang Sosial Media. "
-                  f"Anda memiliki tugas untuk mencari topik pembicaraan mengenai {client}. "
-                  "Dibawah ini terdapat table yang saya copy untuk anda yang berisikan perckapan sosial media "
-                  f"mengenai {client} tersebut dan juga jumlah percakapan pada spesifik pembicaraan tersebut. "
-                  "Tugas anda adalah merangkum … (instruksi selengkapnya sama seperti arahan Anda).")
+                  f"Tugas Anda mencari topik percakapan mengenai {client}. "
+                  "Di bawah ini saya lampirkan ringkasan topik beserta jumlah percakapan per topik. "
+                  "Silakan rangkum … (instruksi lengkap).")
     else:
         header = (f"Anda adalah seorang data analyst yang bergerak di bidang Media Daring. "
-                  f"Anda memiliki tugas untuk mencari topik pemberitaan mengenai {client}. "
-                  "Dibawah ini terdapat table yang saya copy untuk anda … (instruksi selengkapnya).")
+                  f"Tugas Anda mencari topik pemberitaan mengenai {client}. "
+                  "Di bawah ini saya lampirkan ringkasan topik beserta jumlah artikel per topik. "
+                  "Silakan rangkum … (instruksi lengkap).")
     rows_txt = "\n".join(f"- {r}" for r in rows)
     return f"{header}\n\n{rows_txt}"
 
 def copy_template_component(text: str, uid: str):
+    """Hanya 1 tombol 📋 Copy; textarea disembunyikan di luar layar."""
     components.html(f"""
-    <div style="margin-bottom:6px">
-      <textarea id="tmpl_{uid}" style="width:100%;height:300px">{text}</textarea><br>
-      <button style="margin-top:4px;padding:6px 12px;cursor:pointer"
-              onclick="navigator.clipboard.writeText(
-                       document.getElementById('tmpl_{uid}').value);
+    <div>
+      <textarea id="tmpl_{uid}" style="position:absolute;left:-10000px;top:-10000px;">{text}</textarea>
+      <button style="margin:4px 0;padding:6px 12px;cursor:pointer"
+              onclick="navigator.clipboard.writeText(document.getElementById('tmpl_{uid}').value);
                        alert('📋 Template tersalin!');">
               📋 Copy Template
       </button>
     </div>
-    """, height=330)
+    """, height=45)
 
 # ---------- DASHBOARD : ONM ---------------------------------------------------
 def run_onm(df):
@@ -182,6 +182,7 @@ def run_onm(df):
 
     kw = st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)", key="onm_kw")
     hl = st.sidebar.text_input("Highlight Kata", key="onm_hl")
+    show_wc = st.sidebar.checkbox("WordCloud", True, key="onm_wc")   # ⬅️ Word-Cloud untuk ONM
 
     # ---------- APPLY FILTER ----------
     m = pd.Series(True, df.index)
@@ -194,10 +195,34 @@ def run_onm(df):
               df["body"].apply(lambda x: match(x, inc, phr, exc)))
     filt = df[m]
 
-    # ---------- TEMPLATE GENERATOR (selalu muncul sebelum tabel) ----------
+    # ---------- RINGKASAN TOPIK ----------
+    rank = {"tier 1":0,"tier 2":1,"tier 3":2,"-":3,"":4}
+    def best_link(g):
+        g = g.copy()
+        g["rk"] = g["tier"].str.lower().map(rank).fillna(4)
+        return g.sort_values("rk")["url"].iloc[0] if not g.empty else "-"
+
+    gpd = (filt.groupby("title", sort=False)
+           .apply(best_link).to_frame("Link")
+           .join(filt.groupby("title")
+                 .agg(Total=("title","size"),
+                      Sentiment=("sentiment", lambda x: x.mode().iloc[0] if not x.mode().empty else "-"))))
+    gpd = (gpd.reset_index()
+                 .sort_values("Total", ascending=False))
+
+    gpd["Sentiment"] = gpd["Sentiment"].apply(badge)
+    gpd["Link"]      = gpd["Link"].apply(lambda u: f'<a href="{clean_url(u)}" target="_blank">Link</a>' if u!="-"
+                                         else "-")
+    if hl:
+        pat = re.compile("(?i)("+"|".join(map(re.escape,
+                       [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
+        gpd["title"] = gpd["title"].apply(lambda t: pat.sub(r"<mark>\\1</mark>", t))
+
+    # ---------- TEMPLATE GENERATOR ----------
     st.markdown("#### 🔖 Copy Prompt Template (ONM)")
     client_name = st.text_input("Nama Client", key="client_onm")
-    tmpl_text   = generate_template(client_name, filt["title"].head(100).tolist(), "onm")
+    rows_tpl = [f"[{t}] ({n} Artikel)" for t, n in zip(gpd["title"].head(100), gpd["Total"].head(100))]
+    tmpl_text = generate_template(client_name, rows_tpl, "onm")
     copy_template_component(tmpl_text, "onm")
 
     # ---------- SIDEBAR STATS ----------
@@ -214,32 +239,19 @@ def run_onm(df):
     </div>
     """, unsafe_allow_html=True)
 
-    # ---------- RINGKASAN TOPIK ----------
-    rank = {"tier 1":0,"tier 2":1,"tier 3":2,"-":3,"":4}
-    def best_link(g):
-        g = g.copy()
-        g["rk"] = g["tier"].str.lower().map(rank).fillna(4)
-        return g.sort_values("rk")["url"].iloc[0] if not g.empty else "-"
-
-    gpd = (filt.groupby("title", sort=False)
-           .apply(best_link).to_frame("Link")
-           .join(filt.groupby("title")
-                 .agg(Total=("title","size"),
-                      Sentiment=("sentiment", lambda x: x.mode().iloc[0] if not x.mode().empty else "-")))
-           .reset_index().sort_values("Total", ascending=False))
-
-    gpd["Sentiment"] = gpd["Sentiment"].apply(badge)
-    gpd["Link"]      = gpd["Link"].apply(lambda u: f'<a href="{clean_url(u)}" target="_blank">Link</a>' if u!="-"
-                                         else "-")
-    if hl:
-        pat = re.compile("(?i)("+"|".join(map(re.escape,
-                       [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
-        gpd["title"] = gpd["title"].apply(lambda t: pat.sub(r"<mark>\\1</mark>", t))
-
     st.markdown("### 📊 Ringkasan Topik (ONM)")
     st.write(gpd[["title","Total","Sentiment","Link"]]
              .style.set_properties(subset=["Total","Link"], **{"text-align":"center"})
              .hide(axis="index").to_html(escape=False), unsafe_allow_html=True)
+
+    # ---------- WORD-CLOUD ----------
+    if show_wc:
+        wc_df = pd.DataFrame(
+            word_freq(filt["title"].tolist() + filt["body"].tolist(), 500),
+            columns=["Kata","Jumlah"])
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### ☁️ Word Cloud (Top 500)")
+        st.sidebar.dataframe(wc_df, use_container_width=True)
 
 # ---------- DASHBOARD : SOSMED -----------------------------------------------
 def run_sosmed(df):
@@ -295,26 +307,6 @@ def run_sosmed(df):
     if kw: m &= df["content"].apply(lambda x: match(x,inc,phr,exc))
     filt = df[m]
 
-    # ---------- TEMPLATE GENERATOR ----------
-    st.markdown("#### 🔖 Copy Prompt Template (Sosmed)")
-    client_name = st.text_input("Nama Client", key="client_soc")
-    tmpl_text   = generate_template(client_name, filt["content"].head(100).tolist(), "sosmed")
-    copy_template_component(tmpl_text, "soc")
-
-    # ---------- SIDEBAR STATS ----------
-    sl = filt["final_sentiment"].str.lower()
-    stats_box.markdown(f"""
-    <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
-      <span style='font-size:24px'>📊</span>
-      <span style='font-size:26px;font-weight:bold'>{len(filt):,} Percakapan</span>
-    </div>
-    <div style='font-size:15px;'>
-      <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span> |
-      <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span> |
-      <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
-    </div>
-    """, unsafe_allow_html=True)
-
     # ---------- CONVERSATION SCOPE BUILD ----------
     is_com  = filt["reply_to_original_id"].notna()
     is_post = filt["post_type"].str.lower()=="post_made"
@@ -351,7 +343,7 @@ def run_sosmed(df):
     summary=(base.groupby("content", sort=False)
              .agg(Total=("value","sum"),
                   Sentiment=("sent_final",lambda x: x.mode().iloc[0] if not x.mode().empty else "-"),
-                  Link=("link", lambda x: best_link(x, base.loc[x.index,"value"])))
+                  Link=("link", lambda x: best_link(x, base.loc[x.index,"value"])) )
              .sort_values("Total",ascending=False).reset_index())
 
     summary["Short"] = summary["content"].apply(safe_shorten)
@@ -368,6 +360,28 @@ def run_sosmed(df):
         pat=re.compile("(?i)("+"|".join(map(re.escape,
                      [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
         summary["Text"]=summary["Text"].apply(lambda t: pat.sub(r"<mark>\\1</mark>", t))
+
+    # ---------- TEMPLATE GENERATOR ----------
+    st.markdown("#### 🔖 Copy Prompt Template (Sosmed)")
+    client_name = st.text_input("Nama Client", key="client_soc")
+    rows_tpl = [f"[{safe_shorten(c,80)}] ({n} Talk)" for c, n in zip(summary["Text"].head(100), summary["Total"].head(100))]
+    # `safe_shorten` agar satu baris
+    tmpl_text   = generate_template(client_name, rows_tpl, "sosmed")
+    copy_template_component(tmpl_text, "soc")
+
+    # ---------- SIDEBAR STATS ----------
+    sl = filt["final_sentiment"].str.lower()
+    stats_box.markdown(f"""
+    <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
+      <span style='font-size:24px'>📊</span>
+      <span style='font-size:26px;font-weight:bold'>{len(filt):,} Percakapan</span>
+    </div>
+    <div style='font-size:15px;'>
+      <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span> |
+      <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span> |
+      <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
+    </div>
+    """, unsafe_allow_html=True)
 
     st.markdown("### 📊 Ringkasan Topik (Sosmed)")
     st.caption(f"Dataset: {len(filt):,} | Summary: {len(summary):,}")
