@@ -1,11 +1,10 @@
 # =========================================================
 #  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
-#  2025-06-13  –  word-cloud kini di sidebar (paling bawah)
-#  + 2025-06-13  –  ✨ Template-Generator & Copy-to-Clipboard button
+#  2025-06-13  —  + Prompt-Template Copy Button
 # =========================================================
 
 import streamlit as st, pandas as pd, re, textwrap, zipfile, urllib.request
-import streamlit.components.v1 as components         # ← NEW
+import streamlit.components.v1 as components   # ⬅️ butuh untuk tombol-clipboard
 from collections import Counter, defaultdict
 
 # ---------- CONFIG ----------
@@ -93,58 +92,7 @@ def badge(val):
     clr = {"positive": "green", "negative": "red", "neutral": "gray"}.get(str(val).lower(), "black")
     return f'<span style="color:{clr};font-weight:bold">{val}</span>'
 
-# ---------- NEW UTIL : Template Generator ----------
-def generate_template(client: str, rows: list[str], mode: str) -> str:
-    """Return the full analyst-instruction template."""
-    client = client or "[Client]"
-    if mode == "sosmed":
-        header = (f"Anda adalah seorang data analyst yang bergerak di bidang Sosial Media. "
-                  f"Anda memiliki tugas untuk mencari topik pembicaraan mengenai {client}. "
-                  f"Dibawah ini terdapat table yang saya copy untuk anda yang berisikan perckapan sosial media "
-                  f"mengenai {client} tersebut dan juga jumlah percakapan pada spesifik pembicaraan tersebut. "
-                  "Tugas anda adalah merangkum dengan menggabungkan pembicaraan dengan topik yang sama lalu "
-                  "menjumlahkan total pembicaraannya kemudian memberikan 1 kalimat mengenai isu tersebut. "
-                  "Berikan saya 5 topik pembicaraan yang masing masing berbeda dan unique yang paling banyak "
-                  "mendapatkan pembicaraan atau Top 5 topic. INGAT anda dapat menggabungkan beberapa postingan "
-                  "atau percakapan menjadi 1 topik pembicaraan dan menggabungkan jumlahnya juga lalu berikan saya. "
-                  "TOLONG berikan saya dalam bentuk kalimat (seperti judul dan di bawahnya merupakan penjelsan singkat "
-                  "dan mudha di cari kembali dalam data) serta sebelah judul menggunakan kurung untuk jumlahnya dan di bagian "
-                  "bawah buat dalam bold dan italic keyword yang digunakana untuk mencari isu tersebut yang memang unique "
-                  "(keyword dapat menggunakan AND dan OR namun harus anda perjelas) dan hanya 1 atau 2 keyword saja yang "
-                  "benar benar unique dan tidak umum. Berikan saya dalam bentuk non tabel ya. "
-                  "Saya ingin anda melakukan deep analisis terhadap suatu permasalahn dan topik di bawah ini "
-                  "sehingga hasil yang diberikan tetap maksimal. Berikut listnya")
-    else:  # onm
-        header = (f"Anda adalah seorang data analyst yang bergerak di bidang Media Daring. "
-                  f"Anda memiliki tugas untuk mencari topik pemberitaan mengenai {client}. "
-                  f"Dibawah ini terdapat table yang saya copy untuk anda yang berisikan pemberitaan media daring "
-                  f"mengenai {client} tersebut dan juga jumlah pemberitaan pada spesifik pemberitaan tersebut. "
-                  "Tugas anda adalah merangkum dengan menggabungkan pemberitaan dengan topik yang sama lalu "
-                  "menjumlahkan total pemberitaan kemudian memberikan 1 kalimat mengenai isu tersebut. "
-                  "Berikan saya 5 topik pemberitaan yang masing masing berbeda dan unique yang paling banyak "
-                  "mendapatkan pembicaraan atau Top 5 topic. INGAT anda dapat menggabungkan beberapa berita atau "
-                  "pemberitaan menjadi 1 topik pembicaraan dan menggabungkan jumlahnya juga lalu berikan saya. "
-                  "TOLONG berikan saya dalam bentuk kalimat (seperti judul dan di bawahnya merupakan penjelsan singkat "
-                  "dan mudha di cari kembali dalam data) serta sebelah judul menggunakan kurung untuk jumlahnya dan di bagian "
-                  "bawah buat dalam bold dan italic keyword yang digunakana untuk mencari isu tersebut yang memang unique "
-                  "(keyword dapat menggunakan AND dan OR namun harus anda perjelas) dan hanya 1 atau 2 keyword saja yang "
-                  "benar benar unique dan tidak umum. Berikan saya dalam bentuk non tabel ya. "
-                  "Saya ingin anda melakukan deep analisis terhadap suatu permasalahn dan topik di bawah ini "
-                  "sehingga hasil yang diberikan tetap maksimal. Berikut listnya")
-    rows_txt = "\n".join(f"- {r}" for r in rows)
-    return f"{header}\n\n{rows_txt}"
-
-def copy_template_component(text: str, uid: str):
-    """Render a textarea + copy-button that writes the template to clipboard (pure JS)."""
-    components.html(f"""
-    <div style="margin-bottom:6px;">
-      <textarea id="tmpl_{uid}" style="width:100%;height:300px;">{text}</textarea><br>
-      <button onclick="navigator.clipboard.writeText(document.getElementById('tmpl_{uid}').value);
-                       alert('📋 Template copied!');">📋 Copy Template</button>
-    </div>
-    """, height=340)
-
-# ---------- UTIL : adv. keyword ----------
+# ---------- ADVANCED KEYWORD PARSER ----------
 def parse_adv(q):
     q = q.strip()
     inc, phr, exc = [], [], []
@@ -167,7 +115,7 @@ def match(text, inc, phr, exc):
         return False
     return all(any(w in low for w in g) for g in inc)
 
-# ---------- UTIL : safe shorten ----------
+# ---------- SAFE SHORTEN ----------
 def safe_shorten(txt, width=120):
     try:
         plain = re.sub(r'<.*?>', '', str(txt))
@@ -175,7 +123,36 @@ def safe_shorten(txt, width=120):
     except Exception:
         return str(txt)[:width] + "…"
 
-# ---------- DASHBOARD : ONM ----------
+# ---------- PROMPT-TEMPLATE UTIL ---------------------------------------------
+def generate_template(client: str, rows: list[str], mode: str) -> str:
+    client = client or "[Client]"
+    if mode == "sosmed":
+        header = (f"Anda adalah seorang data analyst yang bergerak di bidang Sosial Media. "
+                  f"Anda memiliki tugas untuk mencari topik pembicaraan mengenai {client}. "
+                  "Dibawah ini terdapat table yang saya copy untuk anda yang berisikan perckapan sosial media "
+                  f"mengenai {client} tersebut dan juga jumlah percakapan pada spesifik pembicaraan tersebut. "
+                  "Tugas anda adalah merangkum … (instruksi selengkapnya sama seperti arahan Anda).")
+    else:
+        header = (f"Anda adalah seorang data analyst yang bergerak di bidang Media Daring. "
+                  f"Anda memiliki tugas untuk mencari topik pemberitaan mengenai {client}. "
+                  "Dibawah ini terdapat table yang saya copy untuk anda … (instruksi selengkapnya).")
+    rows_txt = "\n".join(f"- {r}" for r in rows)
+    return f"{header}\n\n{rows_txt}"
+
+def copy_template_component(text: str, uid: str):
+    components.html(f"""
+    <div style="margin-bottom:6px">
+      <textarea id="tmpl_{uid}" style="width:100%;height:300px">{text}</textarea><br>
+      <button style="margin-top:4px;padding:6px 12px;cursor:pointer"
+              onclick="navigator.clipboard.writeText(
+                       document.getElementById('tmpl_{uid}').value);
+                       alert('📋 Template tersalin!');">
+              📋 Copy Template
+      </button>
+    </div>
+    """, height=330)
+
+# ---------- DASHBOARD : ONM ---------------------------------------------------
 def run_onm(df):
     need = {"title", "body", "url", "tier", "sentiment", "label", "date_published"}
     df = trim_columns(df.rename(str.lower, axis=1), need)
@@ -185,267 +162,252 @@ def run_onm(df):
     df["tier"] = df["tier"].fillna("-")
     df["label"] = df["label"].fillna("")
 
+    # ---------- SIDEBAR FILTER ----------
     st.sidebar.header("🎛️ Filter — ONM")
-    stats_box = st.sidebar.empty()  # kotak statistik
+    stats_box = st.sidebar.empty()
 
     sent_sel = st.sidebar.selectbox("Sentimen", ["All"] + sorted(df["sentiment"].str.lower().unique()))
-    lab_sel = st.sidebar.selectbox("Label", ["All"] + sorted({l.strip() for sub in df["label"]
+    lab_sel  = st.sidebar.selectbox("Label", ["All"] + sorted({l.strip() for sub in df["label"]
                                                               for l in str(sub).split(',') if l.strip()}))
     mode = st.sidebar.radio("Filter tanggal", ["Semua", "Custom"], horizontal=True, key="onm_date_mode")
     use_date = False
-    d_start = d_end = None
     if mode == "Custom" and date_col and not df[date_col].dropna().empty:
-        mn, mx = df[date_col].min().date(), df[date_col].max().date()
-        d_start, d_end = st.sidebar.date_input("Rentang", (mn, mx),
-                                               min_value=mn, max_value=mx, key="onm_date_input")
+        d_start, d_end = st.sidebar.date_input(
+            "Rentang", (df[date_col].min().date(), df[date_col].max().date()),
+            key="onm_date_input")
         use_date = True
 
     if st.sidebar.button("🔄 Clear", key="onm_clear"):
         st.session_state.update(onm_kw="", onm_hl="")
+
     kw = st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)", key="onm_kw")
     hl = st.sidebar.text_input("Highlight Kata", key="onm_hl")
 
-    # apply filter
+    # ---------- APPLY FILTER ----------
     m = pd.Series(True, df.index)
-    if sent_sel != "All":
-        m &= df["sentiment"].str.lower() == sent_sel
-    if lab_sel != "All":
-        m &= df["label"].apply(lambda x: lab_sel in [s.strip() for s in str(x).split(',')])
-    if use_date and date_col:
-        m &= df[date_col].dt.date.between(d_start, d_end)
+    if sent_sel != "All": m &= df["sentiment"].str.lower() == sent_sel
+    if lab_sel  != "All": m &= df["label"].apply(lambda x: lab_sel in [s.strip() for s in str(x).split(',')])
+    if use_date and date_col: m &= df[date_col].dt.date.between(d_start, d_end)
     inc, phr, exc = parse_adv(kw)
     if kw:
         m &= (df["title"].apply(lambda x: match(x, inc, phr, exc)) |
               df["body"].apply(lambda x: match(x, inc, phr, exc)))
     filt = df[m]
 
-    # ---------- Template BEFORE main table ----------
-    with st.expander("📋 Generate Analyst Template (ONM)"):
-        client_name = st.text_input("Nama Client", key="client_onm")
-        rows_for_tmpl = filt["title"].head(100).tolist()
-        tmpl_text = generate_template(client_name or "[Client]", rows_for_tmpl, "onm")
-        copy_template_component(tmpl_text, "onm")
+    # ---------- TEMPLATE GENERATOR (selalu muncul sebelum tabel) ----------
+    st.markdown("#### 🔖 Copy Prompt Template (ONM)")
+    client_name = st.text_input("Nama Client", key="client_onm")
+    tmpl_text   = generate_template(client_name, filt["title"].head(100).tolist(), "onm")
+    copy_template_component(tmpl_text, "onm")
 
-    # ---------- sidebar stats ----------
+    # ---------- SIDEBAR STATS ----------
     sl = filt["sentiment"].str.lower()
-    total_artikel = len(filt)
     stats_box.markdown(f"""
     <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
-        <span style='font-size:24px'>📊</span>
-        <span style='font-size:26px;font-weight:bold'>{total_artikel:,} Article</span>
+      <span style='font-size:24px'>📊</span>
+      <span style='font-size:26px;font-weight:bold'>{len(filt):,} Article</span>
     </div>
     <div style='font-size:15px;'>
-        <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span>&nbsp;|&nbsp;
-        <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span>&nbsp;|&nbsp;
-        <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
+      <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span> |
+      <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span> |
+      <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
     </div>
     """, unsafe_allow_html=True)
 
-    # ringkasan
-    rank = {"tier 1": 0, "tier 2": 1, "tier 3": 2, "-": 3, "": 4}
+    # ---------- RINGKASAN TOPIK ----------
+    rank = {"tier 1":0,"tier 2":1,"tier 3":2,"-":3,"":4}
     def best_link(g):
         g = g.copy()
         g["rk"] = g["tier"].str.lower().map(rank).fillna(4)
-        g = g.sort_values("rk")
-        return g["url"].iloc[0] if not g["url"].empty else "-"
-    gpd = (filt.groupby("title", sort=False).apply(best_link).to_frame("Link")
-           .join(filt.groupby("title").agg(Total=("title", "size"),
-                                           Sentiment=("sentiment", lambda x: x.mode().iloc[0]
-                                                      if not x.mode().empty else "-"))))
-    gpd = gpd.reset_index().sort_values("Total", ascending=False)
+        return g.sort_values("rk")["url"].iloc[0] if not g.empty else "-"
+
+    gpd = (filt.groupby("title", sort=False)
+           .apply(best_link).to_frame("Link")
+           .join(filt.groupby("title")
+                 .agg(Total=("title","size"),
+                      Sentiment=("sentiment", lambda x: x.mode().iloc[0] if not x.mode().empty else "-")))
+           .reset_index().sort_values("Total", ascending=False))
+
     gpd["Sentiment"] = gpd["Sentiment"].apply(badge)
-    gpd["Link"] = gpd["Link"].apply(lambda u: f'<a href="{clean_url(u)}" target="_blank">Link</a>'
-                                    if u != "-" else "-")
+    gpd["Link"]      = gpd["Link"].apply(lambda u: f'<a href="{clean_url(u)}" target="_blank">Link</a>' if u!="-"
+                                         else "-")
     if hl:
-        pattern = re.compile("(?i)(" + "|".join(map(re.escape,
-                                   [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)])) + ")")
-        gpd["title"] = gpd["title"].apply(lambda t: pattern.sub(r"<mark>\1</mark>", t))
+        pat = re.compile("(?i)("+"|".join(map(re.escape,
+                       [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
+        gpd["title"] = gpd["title"].apply(lambda t: pat.sub(r"<mark>\\1</mark>", t))
 
     st.markdown("### 📊 Ringkasan Topik (ONM)")
-    st.write(gpd[["title", "Total", "Sentiment", "Link"]]
-             .style.set_properties(subset=["Total", "Link"], **{"text-align": "center"})
+    st.write(gpd[["title","Total","Sentiment","Link"]]
+             .style.set_properties(subset=["Total","Link"], **{"text-align":"center"})
              .hide(axis="index").to_html(escape=False), unsafe_allow_html=True)
 
-# ---------- DASHBOARD : SOSMED ----------
+# ---------- DASHBOARD : SOSMED -----------------------------------------------
 def run_sosmed(df):
-    need = {"content", "post_type", "final_sentiment", "specific_resource",
-            "specific_resource_type", "reply_to_original_id", "original_id",
-            "link", "date_created"}
+    need = {"content","post_type","final_sentiment","specific_resource",
+            "specific_resource_type","reply_to_original_id","original_id",
+            "link","date_created"}
     df = trim_columns(df.rename(str.lower, axis=1), need)
     df["content"] = df["content"].astype(str).str.lstrip("'")
     df["final_sentiment"] = df["final_sentiment"].astype(str).str.strip("\"' ")
     df["link"] = df["link"].apply(clean_url)
     date_col = get_date_column(df, ["date_created"])
 
-    plat_col = "specific_resource_type" if df["specific_resource_type"].str.strip().any() else "specific_resource"
+    plat_col = ("specific_resource_type"
+                if df["specific_resource_type"].str.strip().any()
+                else "specific_resource")
 
+    # ---------- SIDEBAR FILTER ----------
     st.sidebar.header("🎛️ Filter — Sosmed")
-    stats_box = st.sidebar.empty()  # kotak statistik
+    stats_box = st.sidebar.empty()
 
-    scope = st.sidebar.radio("Conversation", ("All", "Tanpa Comment", "Tanpa Post"), index=0)
+    scope = st.sidebar.radio("Conversation", ("All","Tanpa Comment","Tanpa Post"), key="soc_scope")
 
     plat_values = sorted({p for p in df[plat_col].dropna() if str(p).strip()})
-    sel_plat = []
+    sel_plat=[]
     if plat_values:
         st.sidebar.markdown("**Platform**")
         cols = st.sidebar.columns(len(plat_values))
-        for i, p in enumerate(plat_values):
-            if cols[i].checkbox(p, value=True, key=f"plat_{p}", label_visibility="collapsed"):
-                sel_plat.append(p)
+        for i,p in enumerate(plat_values):
+            if cols[i].checkbox(p,True,key=f"plat_{p}",label_visibility="collapsed"): sel_plat.append(p)
             cols[i].markdown(platform_color_badge(p), unsafe_allow_html=True)
 
     sent_sel = st.sidebar.selectbox("Sentimen", ["All"] + sorted(df["final_sentiment"].str.lower().unique()))
-    mode = st.sidebar.radio("Filter tanggal", ["Semua", "Custom"], horizontal=True, key="soc_date_mode")
-    use_date = False
-    d_start = d_end = None
-    if mode == "Custom" and date_col and not df[date_col].dropna().empty:
-        mn, mx = df[date_col].min().date(), df[date_col].max().date()
-        d_start, d_end = st.sidebar.date_input("Rentang", (mn, mx),
-                                               min_value=mn, max_value=mx, key="soc_date_input")
-        use_date = True
+    mode = st.sidebar.radio("Filter tanggal", ["Semua","Custom"], horizontal=True, key="soc_date_mode")
+    use_date=False
+    if mode=="Custom" and date_col and not df[date_col].dropna().empty:
+        d_start,d_end = st.sidebar.date_input(
+            "Rentang", (df[date_col].min().date(), df[date_col].max().date()),
+            key="soc_date_input"); use_date=True
 
     if st.sidebar.button("🔄 Clear", key="soc_clear"):
         st.session_state.update(soc_kw="", soc_hl="")
+
     kw = st.sidebar.text_input("Kata kunci (\"frasa\" -exclude)", key="soc_kw")
     hl = st.sidebar.text_input("Highlight Kata", key="soc_hl")
     show_wc = st.sidebar.checkbox("WordCloud", True, key="soc_wc")
 
-    # apply filter
+    # ---------- APPLY FILTER ----------
     m = pd.Series(True, df.index)
-    if sel_plat:
-        m &= df[plat_col].isin(sel_plat)
-    if sent_sel != "All":
-        m &= df["final_sentiment"].str.lower() == sent_sel
-    if use_date and date_col:
-        m &= df[date_col].dt.date.between(d_start, d_end)
-    inc, phr, exc = parse_adv(kw)
-    if kw:
-        m &= df["content"].apply(lambda x: match(x, inc, phr, exc))
+    if sel_plat: m &= df[plat_col].isin(sel_plat)
+    if sent_sel!="All": m &= df["final_sentiment"].str.lower()==sent_sel
+    if use_date and date_col: m &= df[date_col].dt.date.between(d_start,d_end)
+    inc,phr,exc = parse_adv(kw)
+    if kw: m &= df["content"].apply(lambda x: match(x,inc,phr,exc))
     filt = df[m]
 
-    # ---------- Template BEFORE main table ----------
-    with st.expander("📋 Generate Analyst Template (Sosmed)"):
-        client_name = st.text_input("Nama Client", key="client_soc")
-        rows_for_tmpl = filt["content"].head(100).tolist()
-        tmpl_text = generate_template(client_name or "[Client]", rows_for_tmpl, "sosmed")
-        copy_template_component(tmpl_text, "soc")
+    # ---------- TEMPLATE GENERATOR ----------
+    st.markdown("#### 🔖 Copy Prompt Template (Sosmed)")
+    client_name = st.text_input("Nama Client", key="client_soc")
+    tmpl_text   = generate_template(client_name, filt["content"].head(100).tolist(), "sosmed")
+    copy_template_component(tmpl_text, "soc")
 
-    # ---------- sidebar stats ----------
+    # ---------- SIDEBAR STATS ----------
     sl = filt["final_sentiment"].str.lower()
-    total_talk = len(filt)
     stats_box.markdown(f"""
     <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
-        <span style='font-size:24px'>📊</span>
-        <span style='font-size:26px;font-weight:bold'>{total_talk:,} Percakapan</span>
+      <span style='font-size:24px'>📊</span>
+      <span style='font-size:26px;font-weight:bold'>{len(filt):,} Percakapan</span>
     </div>
     <div style='font-size:15px;'>
-        <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span>&nbsp;|&nbsp;
-        <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span>&nbsp;|&nbsp;
-        <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
+      <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span> |
+      <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span> |
+      <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
     </div>
     """, unsafe_allow_html=True)
 
-    # scope breakdown
-    is_com = filt["reply_to_original_id"].notna()
-    is_post = filt["post_type"].str.lower() == "post_made"
-    if scope == "Tanpa Comment":
-        filt_scope = filt[~is_com]
-    elif scope == "Tanpa Post":
-        filt_scope = filt[~is_post]
-    else:
-        filt_scope = filt
+    # ---------- CONVERSATION SCOPE BUILD ----------
+    is_com  = filt["reply_to_original_id"].notna()
+    is_post = filt["post_type"].str.lower()=="post_made"
+
+    if scope=="Tanpa Comment": filt_scope=filt[~is_com]
+    elif scope=="Tanpa Post": filt_scope=filt[~is_post]
+    else: filt_scope=filt
 
     comments = filt_scope[is_com]
-    com_cnt = comments.groupby("reply_to_original_id").size()
+    com_cnt  = comments.groupby("reply_to_original_id").size()
     com_sent = comments.groupby("reply_to_original_id")["final_sentiment"].agg(
         lambda x: x.mode().iloc[0] if not x.mode().empty else None)
+
     posts = filt_scope[is_post].copy()
     posts["value"] = posts["original_id"].map(com_cnt).fillna(0).astype(int)
     posts["sent_final"] = posts["original_id"].map(com_sent).fillna(posts["final_sentiment"])
+
     talk = filt_scope[~is_post].copy()
     talk["value"] = 1
-    talk["sent_final"] = talk["final_sentiment"]
-    if scope == "Tanpa Post":
-        base = talk
-    elif scope == "Tanpa Comment":
-        base = pd.concat([talk, posts], ignore_index=True)
+    talk["sent_final"]=talk["final_sentiment"]
+
+    if scope=="Tanpa Post": base=talk
+    elif scope=="Tanpa Comment": base=pd.concat([talk,posts],ignore_index=True)
     else:
-        c_all = comments.copy()
-        c_all["value"] = 1
-        c_all["sent_final"] = c_all["final_sentiment"]
-        base = pd.concat([talk, posts, c_all], ignore_index=True)
+        c_all=comments.copy(); c_all["value"]=1; c_all["sent_final"]=c_all["final_sentiment"]
+        base=pd.concat([talk,posts,c_all],ignore_index=True)
 
-    def best_link(series, val):
-        d = pd.DataFrame({"link": series, "val": val}).dropna()
-        d = d[d["link"].astype(str).str.strip() != ""]
-        return clean_url(d.sort_values("val", ascending=False)["link"].iloc[0]) if not d.empty else "-"
+    # ---------- SUMMARY ----------
+    def best_link(series,val):
+        d=pd.DataFrame({"link":series,"val":val}).dropna()
+        d=d[d["link"].astype(str).str.strip()!=""]
+        return clean_url(d.sort_values("val",ascending=False)["link"].iloc[0]) if not d.empty else "-"
 
-    summary = (base.groupby("content", sort=False)
-               .agg(Total=("value", "sum"),
-                    Sentiment=("sent_final", lambda x: x.mode().iloc[0] if not x.mode().empty else "-"),
-                    Link=("link", lambda x: best_link(x, base.loc[x.index, "value"]))))
+    summary=(base.groupby("content", sort=False)
+             .agg(Total=("value","sum"),
+                  Sentiment=("sent_final",lambda x: x.mode().iloc[0] if not x.mode().empty else "-"),
+                  Link=("link", lambda x: best_link(x, base.loc[x.index,"value"])))
+             .sort_values("Total",ascending=False).reset_index())
 
-    summary = summary.sort_values("Total", ascending=False).reset_index()
     summary["Short"] = summary["content"].apply(safe_shorten)
-    summary["Text"] = summary.apply(lambda r: f'<span title="{str(r.content)}">{r.Short}</span>', axis=1)
-    summary["Sentiment"] = summary["Sentiment"].apply(badge)
-    summary["Link"] = summary["Link"].apply(lambda u: f'<a href="{u}" target="_blank">Link</a>' if u != "-"
-                                            else "-")
-    summary["Platform"] = summary["Link"].apply(
+    summary["Text"]  = summary.apply(lambda r: f'<span title="{str(r.content)}">{r.Short}</span>', axis=1)
+    summary["Sentiment"]=summary["Sentiment"].apply(badge)
+    summary["Link"]=summary["Link"].apply(lambda u: f'<a href="{u}" target="_blank">Link</a>' if u!="-"
+                                          else "-")
+    summary["Platform"]=summary["Link"].apply(
         lambda html: platform_from_url(re.search(r'href="([^"]+)"', html).group(1))
         if "href" in html else "-")
 
-    summary = summary[["Text", "Total", "Sentiment", "Platform", "Link"]]
+    summary = summary[["Text","Total","Sentiment","Platform","Link"]]
     if hl:
-        pattern = re.compile("(?i)(" + "|".join(map(re.escape,
-                                   [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)])) + ")")
-        summary["Text"] = summary["Text"].apply(lambda t: pattern.sub(r"<mark>\1</mark>", t))
+        pat=re.compile("(?i)("+"|".join(map(re.escape,
+                     [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
+        summary["Text"]=summary["Text"].apply(lambda t: pat.sub(r"<mark>\\1</mark>", t))
 
     st.markdown("### 📊 Ringkasan Topik (Sosmed)")
     st.caption(f"Dataset: {len(filt):,} | Summary: {len(summary):,}")
-    st.write(summary.style.set_properties(subset=["Total", "Link", "Platform"],
-                                          **{"text-align": "center"})
+    st.write(summary.style.set_properties(subset=["Total","Link","Platform"],
+                                          **{"text-align":"center"})
              .hide(axis="index").to_html(escape=False), unsafe_allow_html=True)
 
-    # --- Word-Cloud di sidebar ---
+    # ---------- WORD CLOUD ----------
     if show_wc:
-        wc_df = pd.DataFrame(word_freq(base["content"], 500), columns=["Kata", "Jumlah"])
-        st.sidebar.markdown("---")  # pemisah visual
+        wc_df=pd.DataFrame(word_freq(base["content"],500),columns=["Kata","Jumlah"])
+        st.sidebar.markdown("---")
         st.sidebar.markdown("### ☁️ Word Cloud (Top 500)")
         st.sidebar.dataframe(wc_df, use_container_width=True)
 
-# ---------- ENTRY ----------
+# ---------- ENTRY ------------------------------------------------------------
 st.markdown("### 📁 Pilih sumber data")
 mode = st.radio("Input ZIP via:", ["Upload File", "Link Download"], horizontal=True)
 zip_data = None
-if mode == "Upload File":
-    up = st.file_uploader("Unggah ZIP", type="zip")
-    if up:
-        zip_data = up
+if mode=="Upload File":
+    up=st.file_uploader("Unggah ZIP", type="zip")
+    if up: zip_data=up
 else:
-    url = st.text_input("URL ZIP")
+    url=st.text_input("URL ZIP")
     if st.button("Proceed") and url:
-        tmp = "/tmp/data.zip"
-        try:
-            urllib.request.urlretrieve(url, tmp)
-            zip_data = tmp
-        except Exception as e:
-            st.error(f"❌ Gagal unduh: {e}")
+        tmp="/tmp/data.zip"
+        try: urllib.request.urlretrieve(url,tmp); zip_data=tmp
+        except Exception as e: st.error(f"❌ Gagal unduh: {e}")
 
-if "df" not in st.session_state:
-    st.session_state.df = None
+if "df" not in st.session_state: st.session_state.df=None
 if zip_data:
     with st.spinner("📖 Membaca data …"):
-        df_all = extract_csv_from_zip(zip_data)
-        if not df_all.empty:
-            st.session_state.df = df_all.copy()
+        df_all=extract_csv_from_zip(zip_data)
+        if not df_all.empty: st.session_state.df=df_all.copy()
 
 if st.session_state.df is not None:
-    df = st.session_state.df
-    cols = {c.lower() for c in df.columns}
+    df=st.session_state.df
+    cols={c.lower() for c in df.columns}
     if "tier" in cols:
         run_onm(df.copy())
-    elif {"content", "post_type", "final_sentiment"}.issubset(cols):
+    elif {"content","post_type","final_sentiment"}.issubset(cols):
         run_sosmed(df.copy())
     else:
         st.error("❌ Struktur kolom tidak cocok (ONM/Sosmed).")
