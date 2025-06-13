@@ -1,9 +1,11 @@
 # =========================================================
 #  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
 #  2025-06-13  –  word-cloud kini di sidebar (paling bawah)
+#  + 2025-06-13  –  ✨ Template-Generator & Copy-to-Clipboard button
 # =========================================================
 
 import streamlit as st, pandas as pd, re, textwrap, zipfile, urllib.request
+import streamlit.components.v1 as components         # ← NEW
 from collections import Counter, defaultdict
 
 # ---------- CONFIG ----------
@@ -91,6 +93,57 @@ def badge(val):
     clr = {"positive": "green", "negative": "red", "neutral": "gray"}.get(str(val).lower(), "black")
     return f'<span style="color:{clr};font-weight:bold">{val}</span>'
 
+# ---------- NEW UTIL : Template Generator ----------
+def generate_template(client: str, rows: list[str], mode: str) -> str:
+    """Return the full analyst-instruction template."""
+    client = client or "[Client]"
+    if mode == "sosmed":
+        header = (f"Anda adalah seorang data analyst yang bergerak di bidang Sosial Media. "
+                  f"Anda memiliki tugas untuk mencari topik pembicaraan mengenai {client}. "
+                  f"Dibawah ini terdapat table yang saya copy untuk anda yang berisikan perckapan sosial media "
+                  f"mengenai {client} tersebut dan juga jumlah percakapan pada spesifik pembicaraan tersebut. "
+                  "Tugas anda adalah merangkum dengan menggabungkan pembicaraan dengan topik yang sama lalu "
+                  "menjumlahkan total pembicaraannya kemudian memberikan 1 kalimat mengenai isu tersebut. "
+                  "Berikan saya 5 topik pembicaraan yang masing masing berbeda dan unique yang paling banyak "
+                  "mendapatkan pembicaraan atau Top 5 topic. INGAT anda dapat menggabungkan beberapa postingan "
+                  "atau percakapan menjadi 1 topik pembicaraan dan menggabungkan jumlahnya juga lalu berikan saya. "
+                  "TOLONG berikan saya dalam bentuk kalimat (seperti judul dan di bawahnya merupakan penjelsan singkat "
+                  "dan mudha di cari kembali dalam data) serta sebelah judul menggunakan kurung untuk jumlahnya dan di bagian "
+                  "bawah buat dalam bold dan italic keyword yang digunakana untuk mencari isu tersebut yang memang unique "
+                  "(keyword dapat menggunakan AND dan OR namun harus anda perjelas) dan hanya 1 atau 2 keyword saja yang "
+                  "benar benar unique dan tidak umum. Berikan saya dalam bentuk non tabel ya. "
+                  "Saya ingin anda melakukan deep analisis terhadap suatu permasalahn dan topik di bawah ini "
+                  "sehingga hasil yang diberikan tetap maksimal. Berikut listnya")
+    else:  # onm
+        header = (f"Anda adalah seorang data analyst yang bergerak di bidang Media Daring. "
+                  f"Anda memiliki tugas untuk mencari topik pemberitaan mengenai {client}. "
+                  f"Dibawah ini terdapat table yang saya copy untuk anda yang berisikan pemberitaan media daring "
+                  f"mengenai {client} tersebut dan juga jumlah pemberitaan pada spesifik pemberitaan tersebut. "
+                  "Tugas anda adalah merangkum dengan menggabungkan pemberitaan dengan topik yang sama lalu "
+                  "menjumlahkan total pemberitaan kemudian memberikan 1 kalimat mengenai isu tersebut. "
+                  "Berikan saya 5 topik pemberitaan yang masing masing berbeda dan unique yang paling banyak "
+                  "mendapatkan pembicaraan atau Top 5 topic. INGAT anda dapat menggabungkan beberapa berita atau "
+                  "pemberitaan menjadi 1 topik pembicaraan dan menggabungkan jumlahnya juga lalu berikan saya. "
+                  "TOLONG berikan saya dalam bentuk kalimat (seperti judul dan di bawahnya merupakan penjelsan singkat "
+                  "dan mudha di cari kembali dalam data) serta sebelah judul menggunakan kurung untuk jumlahnya dan di bagian "
+                  "bawah buat dalam bold dan italic keyword yang digunakana untuk mencari isu tersebut yang memang unique "
+                  "(keyword dapat menggunakan AND dan OR namun harus anda perjelas) dan hanya 1 atau 2 keyword saja yang "
+                  "benar benar unique dan tidak umum. Berikan saya dalam bentuk non tabel ya. "
+                  "Saya ingin anda melakukan deep analisis terhadap suatu permasalahn dan topik di bawah ini "
+                  "sehingga hasil yang diberikan tetap maksimal. Berikut listnya")
+    rows_txt = "\n".join(f"- {r}" for r in rows)
+    return f"{header}\n\n{rows_txt}"
+
+def copy_template_component(text: str, uid: str):
+    """Render a textarea + copy-button that writes the template to clipboard (pure JS)."""
+    components.html(f"""
+    <div style="margin-bottom:6px;">
+      <textarea id="tmpl_{uid}" style="width:100%;height:300px;">{text}</textarea><br>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('tmpl_{uid}').value);
+                       alert('📋 Template copied!');">📋 Copy Template</button>
+    </div>
+    """, height=340)
+
 # ---------- UTIL : adv. keyword ----------
 def parse_adv(q):
     q = q.strip()
@@ -166,6 +219,13 @@ def run_onm(df):
               df["body"].apply(lambda x: match(x, inc, phr, exc)))
     filt = df[m]
 
+    # ---------- Template BEFORE main table ----------
+    with st.expander("📋 Generate Analyst Template (ONM)"):
+        client_name = st.text_input("Nama Client", key="client_onm")
+        rows_for_tmpl = filt["title"].head(100).tolist()
+        tmpl_text = generate_template(client_name or "[Client]", rows_for_tmpl, "onm")
+        copy_template_component(tmpl_text, "onm")
+
     # ---------- sidebar stats ----------
     sl = filt["sentiment"].str.lower()
     total_artikel = len(filt)
@@ -191,8 +251,8 @@ def run_onm(df):
     gpd = (filt.groupby("title", sort=False).apply(best_link).to_frame("Link")
            .join(filt.groupby("title").agg(Total=("title", "size"),
                                            Sentiment=("sentiment", lambda x: x.mode().iloc[0]
-                                                      if not x.mode().empty else "-")))
-           .reset_index().sort_values("Total", ascending=False))
+                                                      if not x.mode().empty else "-"))))
+    gpd = gpd.reset_index().sort_values("Total", ascending=False)
     gpd["Sentiment"] = gpd["Sentiment"].apply(badge)
     gpd["Link"] = gpd["Link"].apply(lambda u: f'<a href="{clean_url(u)}" target="_blank">Link</a>'
                                     if u != "-" else "-")
@@ -263,6 +323,13 @@ def run_sosmed(df):
         m &= df["content"].apply(lambda x: match(x, inc, phr, exc))
     filt = df[m]
 
+    # ---------- Template BEFORE main table ----------
+    with st.expander("📋 Generate Analyst Template (Sosmed)"):
+        client_name = st.text_input("Nama Client", key="client_soc")
+        rows_for_tmpl = filt["content"].head(100).tolist()
+        tmpl_text = generate_template(client_name or "[Client]", rows_for_tmpl, "sosmed")
+        copy_template_component(tmpl_text, "soc")
+
     # ---------- sidebar stats ----------
     sl = filt["final_sentiment"].str.lower()
     total_talk = len(filt)
@@ -316,9 +383,9 @@ def run_sosmed(df):
     summary = (base.groupby("content", sort=False)
                .agg(Total=("value", "sum"),
                     Sentiment=("sent_final", lambda x: x.mode().iloc[0] if not x.mode().empty else "-"),
-                    Link=("link", lambda x: best_link(x, base.loc[x.index, "value"])))
-               .sort_values("Total", ascending=False).reset_index())
+                    Link=("link", lambda x: best_link(x, base.loc[x.index, "value"]))))
 
+    summary = summary.sort_values("Total", ascending=False).reset_index()
     summary["Short"] = summary["content"].apply(safe_shorten)
     summary["Text"] = summary.apply(lambda r: f'<span title="{str(r.content)}">{r.Short}</span>', axis=1)
     summary["Sentiment"] = summary["Sentiment"].apply(badge)
