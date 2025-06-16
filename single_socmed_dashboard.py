@@ -8,10 +8,8 @@ import streamlit.components.v1 as components
 import google.generativeai as genai
 from collections import Counter
 
-# ---------- CONFIG ----------
-st.set_page_config(page_title="Topic Summary – ONM & Sosmed",
-                   page_icon="📊", layout="wide")
-st.title("📰 Topic Summary NoLimit Dashboard — ONM & Sosmed")
+# ... (SEMUA FUNGSI DARI ATAS SAMPAI run_sosmed TETAP SAMA) ...
+# ... (PASTIKAN SEMUA FUNGSI SEBELUM "ENTRY POINT" SUDAH DI-COPY)
 
 # ---------- UTIL : URL & PLATFORM ----------
 def clean_url(u: str) -> str:
@@ -73,7 +71,7 @@ def extract_csv_from_zip(zfile):
                 st.error("❌ ZIP tidak memuat CSV.")
                 return pd.DataFrame()
             df = pd.concat([pd.read_csv(z.open(f), delimiter=";", quotechar='"',
-                                         engine="python", on_bad_lines="skip", dtype=str)
+                                          engine="python", on_bad_lines="skip", dtype=str)
                             for f in files], ignore_index=True)
             return df
     except zipfile.BadZipFile:
@@ -138,7 +136,7 @@ def safe_shorten(txt, width=120):
         return str(txt)[:width] + "…"
 
 # ---------- DASHBOARD : ONM ---------------------------------------------------
-def run_onm(df, model): # LANGKAH 1: Terima model sebagai argumen
+def run_onm(df, model):
     need = {"title", "body", "url", "tier", "sentiment", "label", "date_published"}
     df = trim_columns(df, need)
     date_col = get_date_column(df, ["date_published"])
@@ -184,7 +182,6 @@ def run_onm(df, model): # LANGKAH 1: Terima model sebagai argumen
         pat = re.compile("(?i)("+"|".join(map(re.escape, [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
         gpd["title"] = gpd["title"].apply(lambda t: pat.sub(r"<mark>\1</mark>", t))
 
-    # LANGKAH 2: Ganti template dengan generator ringkasan
     st.markdown("#### ✨ Ringkasan Otomatis (AI)")
     client_name = st.text_input("Nama Client", key="client_onm")
     if st.button("Buat Ringkasan Topik dengan Gemini", key="gen_onm"):
@@ -203,11 +200,10 @@ def run_onm(df, model): # LANGKAH 1: Terima model sebagai argumen
                     st.session_state.onm_summary = response.text
                 except Exception as e:
                     if "RESOURCE_EXHAUSTED" in str(e) or "quota" in str(e).lower():
-                         st.error("⚠️ Gagal: Anda telah mencapai batas kuota gratis harian untuk API Gemini. Coba lagi besok.")
+                        st.error("⚠️ Gagal: Anda telah mencapai batas kuota gratis harian untuk API Gemini. Coba lagi besok.")
                     else:
-                         st.error(f"Terjadi kesalahan saat menghubungi Gemini: {e}")
+                        st.error(f"Terjadi kesalahan saat menghubungi Gemini: {e}")
     
-    # LANGKAH 2: Tampilkan hasil di atas tabel
     if 'onm_summary' in st.session_state and st.session_state.onm_summary:
         with st.expander("📝 **Lihat Ringkasan Eksekutif dari Gemini**", expanded=True):
             st.markdown(st.session_state.onm_summary)
@@ -229,8 +225,9 @@ def run_onm(df, model): # LANGKAH 1: Terima model sebagai argumen
         wc_df = pd.DataFrame(word_freq(source_df["title"].tolist() + source_df["body"].tolist(), 500), columns=["Kata","Jumlah"])
         st.sidebar.dataframe(wc_df, use_container_width=True)
 
+
 # ---------- DASHBOARD : SOSMED -----------------------------------------------
-def run_sosmed(df, model): # LANGKAH 1: Terima model sebagai argumen
+def run_sosmed(df, model):
     need = {"content","post_type","final_sentiment","specific_resource", "specific_resource_type","reply_to_original_id","original_id", "link","date_created"}
     df = trim_columns(df, need)
     df["content"] = df["content"].astype(str).str.lstrip("'")
@@ -294,7 +291,6 @@ def run_sosmed(df, model): # LANGKAH 1: Terima model sebagai argumen
         pat = re.compile("(?i)("+"|".join(map(re.escape, [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
         summary["Text"] = summary["Text"].apply(lambda t: pat.sub(r"<mark>\1</mark>", t))
 
-    # LANGKAH 3: Ganti template dengan generator ringkasan
     st.markdown("#### ✨ Ringkasan Otomatis (AI)")
     client_name = st.text_input("Nama Client", key="client_soc")
     if st.button("Buat Ringkasan Percakapan dengan Gemini", key="gen_soc"):
@@ -318,7 +314,6 @@ def run_sosmed(df, model): # LANGKAH 1: Terima model sebagai argumen
                     else:
                         st.error(f"Terjadi kesalahan saat menghubungi Gemini: {e}")
 
-    # LANGKAH 3: Tampilkan hasil di atas tabel
     if 'soc_summary' in st.session_state and st.session_state.soc_summary:
         with st.expander("📝 **Lihat Ringkasan Percakapan dari Gemini**", expanded=True):
             st.markdown(st.session_state.soc_summary)
@@ -361,44 +356,79 @@ if api_key:
 
 st.sidebar.markdown("---")
 st.markdown("### 📁 Pilih sumber data")
-mode = st.radio("Input ZIP via:", ["Upload File", "Link Download"], horizontal=True)
-zip_data = None
-if mode=="Upload File":
-    up=st.file_uploader("Unggah ZIP", type="zip")
-    if up: zip_data=up
-else:
-    url=st.text_input("URL ZIP")
-    if st.button("Proceed") and url:
-        tmp="/tmp/data.zip"
-        try: urllib.request.urlretrieve(url,tmp); zip_data=tmp
-        except Exception as e: st.error(f"❌ Gagal unduh: {e}")
+mode = st.radio("Input via:", ["Upload File", "Link Download"], horizontal=True)
+data_source = None # <<< MODIFIKASI: Menggunakan variabel generik 'data_source'
 
-if "df" not in st.session_state: st.session_state.df=None
-if zip_data:
+if mode == "Upload File":
+    # <<< MODIFIKASI: Mengubah label dan tipe file yang diterima
+    up = st.file_uploader("Unggah file (.csv atau .zip)", type=["csv", "zip"])
+    if up:
+        data_source = up
+else:
+    url = st.text_input("URL ZIP")
+    if st.button("Proceed") and url:
+        # Logika download dari URL tidak diubah, tetap diasumsikan ZIP
+        tmp = "/tmp/data.zip"
+        try:
+            urllib.request.urlretrieve(url, tmp)
+            data_source = tmp
+        except Exception as e:
+            st.error(f"❌ Gagal unduh: {e}")
+
+if "df" not in st.session_state:
+    st.session_state.df = None
+
+# <<< MODIFIKASI: Logika baru untuk menangani CSV dan ZIP
+if data_source:
     with st.spinner("📖 Membaca data …"):
-        df_all=extract_csv_from_zip(zip_data)
-        if not df_all.empty: st.session_state.df=df_all
+        df_all = pd.DataFrame() # Inisialisasi dataframe kosong
+        try:
+            # Dapatkan nama file, baik dari objek unggahan atau path string
+            file_name = data_source.name if hasattr(data_source, 'name') else data_source
+            
+            if file_name.lower().endswith(".zip"):
+                st.write("Memproses file ZIP...")
+                df_all = extract_csv_from_zip(data_source)
+            elif file_name.lower().endswith(".csv"):
+                st.write("Memproses file CSV...")
+                # Membaca file CSV secara langsung dengan parameter yang sama
+                df_all = pd.read_csv(data_source, delimiter=";", quotechar='"',
+                                     engine="python", on_bad_lines="skip", dtype=str)
+            
+            if not df_all.empty:
+                st.session_state.df = df_all
+        except Exception as e:
+            st.error(f"❌ Terjadi kesalahan saat memproses file: {e}")
+            st.session_state.df = None # Reset jika ada error
 
 # ---------- MAIN LOGIC ----------
 if st.session_state.df is not None:
     df_raw = st.session_state.df
     cols_lower = {c.lower() for c in df_raw.columns}
-    if "tier" in cols_lower:
+    
+    # Deteksi Tipe Dataframe (ONM atau Sosmed)
+    is_onm = "tier" in cols_lower and "title" in cols_lower
+    is_sosmed = {"content", "post_type", "final_sentiment"}.issubset(cols_lower)
+
+    if is_onm:
         needed_cols = {"title", "body", "url", "tier", "sentiment", "label", "date_published"}
         df_onm = pd.DataFrame()
+        # Membuat dataframe baru dengan nama kolom lowercase untuk konsistensi
         for col_name in df_raw.columns:
             if col_name.lower() in needed_cols:
                 df_onm[col_name.lower()] = df_raw[col_name]
-        run_onm(df_onm, model) # LANGKAH 1: Kirim model ke fungsi
+        run_onm(df_onm, model)
 
-    elif {"content", "post_type", "final_sentiment"}.issubset(cols_lower):
+    elif is_sosmed:
         needed_cols = {"content", "post_type", "final_sentiment", "specific_resource", "specific_resource_type", "reply_to_original_id", "original_id", "link", "date_created"}
         df_sosmed = pd.DataFrame()
+        # Membuat dataframe baru dengan nama kolom lowercase untuk konsistensi
         for col_name in df_raw.columns:
             if col_name.lower() in needed_cols:
                 df_sosmed[col_name.lower()] = df_raw[col_name]
-        run_sosmed(df_sosmed, model) # LANGKAH 1: Kirim model ke fungsi
+        run_sosmed(df_sosmed, model)
     else:
         st.error("❌ Struktur kolom tidak cocok (ONM/Sosmed). Pastikan kolom wajib ada.")
+        st.write("Kolom yang terdeteksi:", list(cols_lower))
 else:
-    st.info("Unggah atau tautkan ZIP terlebih dahulu.")
+    st.info("Unggah atau tautkan file data (.csv atau .zip) terlebih dahulu.")
