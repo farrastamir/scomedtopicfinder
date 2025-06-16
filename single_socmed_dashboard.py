@@ -1,10 +1,11 @@
 # =========================================================
 #  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
-#  2025-06-16  —  Optimized & Advanced Features
+#  2025-06-16  —  Integrated with Gemini for Auto-Summary
 # =========================================================
 
 import streamlit as st, pandas as pd, re, textwrap, zipfile, urllib.request
-import streamlit.components.v1 as components      # ⬅️ clipboard-button
+import streamlit.components.v1 as components
+import google.generativeai as genai
 from collections import Counter
 
 # ---------- CONFIG ----------
@@ -55,6 +56,7 @@ def get_date_column(df, prefer: list[str]):
         if col in df.columns:
             df[col] = parse_dates_series(df[col])
             return col
+    # Fallback if preferred columns are not found
     for col in df.columns:
         if re.search(r"date", col, re.I):
             df[col] = parse_dates_series(df[col])
@@ -84,7 +86,6 @@ def load_stopwords():
     return set(pd.read_csv(
         "https://raw.githubusercontent.com/stopwords-iso/stopwords-id/master/stopwords-id.txt",
         header=None)[0].tolist())
-
 STOPWORDS = load_stopwords()
 
 def word_freq(s, top=500):
@@ -96,43 +97,36 @@ def badge(val):
     clr = {"positive": "green", "negative": "red", "neutral": "gray"}.get(str(val).lower(), "black")
     return f'<span style="color:{clr};font-weight:bold">{val}</span>'
 
-# ---------- ADVANCED KEYWORD PARSER V2 (PERBAIKAN 3) ----------
+# ---------- ADVANCED KEYWORD PARSER V2 ----------
 def parse_adv(q: str):
     q = q.strip()
     tokens = re.findall(r'-\([^)]+\)|-"[^"]+"|\([^)]+\)|"[^"]+"|\S+', q)
-    
     includes, phrases, exclude_phrases, exclude_groups = [], [], [], []
-
     for tok in tokens:
         if tok.startswith('-"') and tok.endswith('"'):
             exclude_phrases.append(tok[2:-1].lower())
         elif tok.startswith('-(') and tok.endswith(')'):
             inner_q = tok[2:-1]
             ex_items = [item.strip().lower().replace('"', '') for item in re.findall(r'"[^"]+"|\w+', inner_q)]
-            if ex_items:
-                exclude_groups.append(ex_items)
+            if ex_items: exclude_groups.append(ex_items)
         elif tok.startswith('-'):
             exclude_groups.append([tok[1:].lower()])
         elif tok.startswith('"') and tok.endswith('"'):
             phrases.append(tok[1:-1].lower())
         elif tok.startswith('(') and tok.endswith(')'):
             inc_items = [w.strip().lower() for w in tok[1:-1].split('OR') if w.strip()]
-            if inc_items:
-                includes.append(inc_items)
+            if inc_items: includes.append(inc_items)
         else:
             includes.append([tok.lower()])
-            
     return includes, phrases, exclude_phrases, exclude_groups
 
 def match(text: str, includes: list, phrases: list, exclude_phrases: list, exclude_groups: list) -> bool:
     low = str(text).lower()
-
     if any(p in low for p in exclude_phrases): return False
     for group in exclude_groups:
         if any(w in low for w in group): return False
     if not all(p in low for p in phrases): return False
     if not all(any(w in low for w in g) for g in includes): return False
-        
     return True
 
 # ---------- SAFE SHORTEN ----------
@@ -143,49 +137,17 @@ def safe_shorten(txt, width=120):
     except Exception:
         return str(txt)[:width] + "…"
 
-# ---------- PROMPT-TEMPLATE UTIL ----------
-def generate_template(client: str, rows: list[str], mode: str) -> str:
-    client = client or "[Client]"
-    if mode == "sosmed":
-        header = (f"Anda adalah seorang data analyst yang bergerak di bidang Sosial Media. "
-                  f"Tugas Anda mencari topik percakapan mengenai {client}. "
-                  "Di bawah ini saya lampirkan ringkasan topik beserta jumlah percakapan per topik. "
-                  "Silakan rangkum … (instruksi lengkap).")
-    else:
-        header = (f"Anda adalah seorang data analyst yang bergerak di bidang Media Daring. "
-                  f"Tugas Anda mencari topik pemberitaan mengenai {client}. "
-                  "Di bawah ini saya lampirkan ringkasan topik beserta jumlah artikel per topik. "
-                  "Silakan rangkum … (instruksi lengkap).")
-    rows_txt = "\n".join(f"- {r}" for r in rows)
-    return f"{header}\n\n{rows_txt}"
-
-def copy_template_component(text: str, uid: str):
-    components.html(f"""
-    <div>
-      <textarea id="tmpl_{uid}" style="position:absolute;left:-10000px;top:-10000px;">{text}</textarea>
-      <button style="margin:4px 0;padding:6px 12px;cursor:pointer"
-              onclick="navigator.clipboard.writeText(document.getElementById('tmpl_{uid}').value);
-                       alert('📋 Template tersalin!');">
-              📋 Copy Template
-      </button>
-    </div>
-    """, height=45)
-
 # ---------- DASHBOARD : ONM ---------------------------------------------------
-def run_onm(df):
-    # Kolom sudah dipangkas sebelumnya, tinggal proses
+def run_onm(df, model): # LANGKAH 1: Terima model sebagai argumen
     need = {"title", "body", "url", "tier", "sentiment", "label", "date_published"}
     df = trim_columns(df, need)
     date_col = get_date_column(df, ["date_published"])
-    for c in ["title", "body", "url", "sentiment"]:
-        df[c] = df[c].astype(str).str.strip("'")
+    for c in ["title", "body", "url", "sentiment"]: df[c] = df[c].astype(str).str.strip("'")
     df["tier"] = df["tier"].fillna("-")
     df["label"] = df["label"].fillna("")
 
-    # ---------- SIDEBAR FILTER ----------
     st.sidebar.header("🎛️ Filter — ONM")
     stats_box = st.sidebar.empty()
-
     sent_sel = st.sidebar.selectbox("Sentimen", ["All"] + sorted(df["sentiment"].str.lower().unique()))
     lab_sel = st.sidebar.selectbox("Label", ["All"] + sorted({l.strip() for sub in df["label"] for l in str(sub).split(',') if l.strip()}))
     mode = st.sidebar.radio("Filter tanggal", ["Semua", "Custom"], horizontal=True, key="onm_date_mode")
@@ -193,85 +155,82 @@ def run_onm(df):
     if mode == "Custom" and date_col and not df[date_col].dropna().empty:
         d_start, d_end = st.sidebar.date_input("Rentang", (df[date_col].min().date(), df[date_col].max().date()), key="onm_date_input")
         use_date = True
-
-    if st.sidebar.button("🔄 Clear", key="onm_clear"): st.session_state.update(onm_kw="", onm_hl="")
+    if st.sidebar.button("🔄 Clear", key="onm_clear"): st.session_state.update(onm_kw="", onm_hl="", onm_summary="")
     kw = st.sidebar.text_input("Kata kunci (mendukung \"frasa\" dan -exclude)", key="onm_kw")
     hl = st.sidebar.text_input("Highlight Kata", key="onm_hl")
     show_wc = st.sidebar.checkbox("WordCloud", True, key="onm_wc")
 
-    # ---------- APPLY FILTER ----------
     m = pd.Series(True, df.index)
     if sent_sel != "All": m &= df["sentiment"].str.lower() == sent_sel
     if lab_sel != "All": m &= df["label"].apply(lambda x: lab_sel in [s.strip() for s in str(x).split(',')])
     if use_date and date_col: m &= df[date_col].dt.date.between(d_start, d_end)
-    
-    # Pemanggilan parser baru
     if kw:
         includes, phrases, exclude_phrases, exclude_groups = parse_adv(kw)
         m &= (df["title"].apply(lambda x: match(x, includes, phrases, exclude_phrases, exclude_groups)) |
               df["body"].apply(lambda x: match(x, includes, phrases, exclude_phrases, exclude_groups)))
     filt = df[m]
 
-    # ---------- RINGKASAN TOPIK ----------
     rank = {"tier 1":0, "tier 2":1, "tier 3":2, "-":3, "":4}
     def best_link(g):
         g = g.copy()
         g["rk"] = g["tier"].str.lower().map(rank).fillna(4)
         return g.sort_values("rk")["url"].iloc[0] if not g.empty else "-"
-
     gpd = (filt.groupby("title", sort=False).apply(best_link).to_frame("Link")
            .join(filt.groupby("title").agg(Total=("title","size"), Sentiment=("sentiment", lambda x: x.mode().iloc[0] if not x.mode().empty else "-"))))
     gpd = gpd.reset_index().sort_values("Total", ascending=False)
-    
     gpd["Sentiment"] = gpd["Sentiment"].apply(badge)
     gpd["Link"] = gpd["Link"].apply(lambda u: f'<a href="{clean_url(u)}" target="_blank">Link</a>' if u!="-" else "-")
     if hl:
         pat = re.compile("(?i)("+"|".join(map(re.escape, [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
         gpd["title"] = gpd["title"].apply(lambda t: pat.sub(r"<mark>\1</mark>", t))
 
-    # ---------- TEMPLATE GENERATOR ----------
-    st.markdown("#### 🔖 Copy Prompt Template (ONM)")
+    # LANGKAH 2: Ganti template dengan generator ringkasan
+    st.markdown("#### ✨ Ringkasan Otomatis (AI)")
     client_name = st.text_input("Nama Client", key="client_onm")
-    rows_tpl = [f"[{t}] ({n} Artikel)" for t, n in zip(gpd["title"].head(100), gpd["Total"].head(100))]
-    tmpl_text = generate_template(client_name, rows_tpl, "onm")
-    copy_template_component(tmpl_text, "onm")
+    if st.button("Buat Ringkasan Topik dengan Gemini", key="gen_onm"):
+        if not model:
+            st.warning("API Key Gemini belum dimasukkan di sidebar.")
+        elif gpd.empty:
+            st.warning("Tidak ada data untuk diringkas. Sesuaikan filter Anda.")
+        else:
+            top_10_topics = gpd.head(10)
+            topics_list = [f"- {row['title']} ({row['Total']} artikel)" for index, row in top_10_topics.iterrows()]
+            topics_text = "\n".join(topics_list)
+            prompt = f"""Anda adalah seorang data analyst yang bergerak di bidang Media Daring (Online News Media). Tugas Anda adalah merangkum topik pemberitaan utama mengenai klien bernama "{client_name}". Di bawah ini adalah daftar 10 topik teratas beserta jumlah artikelnya:\n{topics_text}\n\nBerdasarkan data di atas, buatlah sebuah ringkasan eksekutif (executive summary) dalam format poin-poin atau narasi singkat yang menyoroti isu-isu utama yang paling banyak dibicarakan. Fokus pada apa yang menjadi sorotan utama media."""
+            with st.spinner("Gemini sedang menganalisis dan membuat ringkasan..."):
+                try:
+                    response = model.generate_content(prompt)
+                    st.session_state.onm_summary = response.text
+                except Exception as e:
+                    if "RESOURCE_EXHAUSTED" in str(e) or "quota" in str(e).lower():
+                         st.error("⚠️ Gagal: Anda telah mencapai batas kuota gratis harian untuk API Gemini. Coba lagi besok.")
+                    else:
+                         st.error(f"Terjadi kesalahan saat menghubungi Gemini: {e}")
+    
+    # LANGKAH 2: Tampilkan hasil di atas tabel
+    if 'onm_summary' in st.session_state and st.session_state.onm_summary:
+        with st.expander("📝 **Lihat Ringkasan Eksekutif dari Gemini**", expanded=True):
+            st.markdown(st.session_state.onm_summary)
+            if st.button("Hapus Ringkasan", key="clear_onm_summary"):
+                st.session_state.onm_summary = ""
+                st.rerun()
 
-    # ---------- SIDEBAR STATS ----------
     sl = filt["sentiment"].str.lower()
-    stats_box.markdown(f"""
-    <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
-      <span style='font-size:24px'>📊</span>
-      <span style='font-size:26px;font-weight:bold'>{len(filt):,} Artikel</span>
-    </div>
-    <div style='font-size:15px;'>
-      <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span> |
-      <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span> |
-      <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
-    </div>
-    """, unsafe_allow_html=True)
-
+    stats_box.markdown(f"""<div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'><span style='font-size:24px'>📊</span><span style='font-size:26px;font-weight:bold'>{len(filt):,} Artikel</span></div><div style='font-size:15px;'><span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span> | <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span> | <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span></div>""", unsafe_allow_html=True)
     st.markdown("### 📊 Ringkasan Topik (ONM)")
     st.write(gpd[["title","Total","Sentiment","Link"]].style.set_properties(subset=["Total","Link"], **{"text-align":"center"}).hide(axis="index").to_html(escape=False), unsafe_allow_html=True)
-
-    # ---------- WORD-CLOUD (PERBAIKAN 4) ----------
     if show_wc:
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### ☁️ Word Cloud (Top 500)")
+        st.sidebar.markdown("---"); st.sidebar.markdown("### ☁️ Word Cloud (Top 500)")
         wc_dynamic = st.sidebar.checkbox("Wordcloud Dinamis (mengikuti filter)", value=False, key="onm_wc_dynamic")
-        
         if wc_dynamic:
-            st.sidebar.caption("Mode: Dinamis (berdasarkan data terfilter)")
-            source_df = filt
+            st.sidebar.caption("Mode: Dinamis (berdasarkan data terfilter)"); source_df = filt
         else:
-            st.sidebar.caption("Mode: Statis (berdasarkan data utama)")
-            source_df = df
-            
+            st.sidebar.caption("Mode: Statis (berdasarkan data utama)"); source_df = df
         wc_df = pd.DataFrame(word_freq(source_df["title"].tolist() + source_df["body"].tolist(), 500), columns=["Kata","Jumlah"])
         st.sidebar.dataframe(wc_df, use_container_width=True)
 
 # ---------- DASHBOARD : SOSMED -----------------------------------------------
-def run_sosmed(df):
-    # Kolom sudah dipangkas, tinggal proses
+def run_sosmed(df, model): # LANGKAH 1: Terima model sebagai argumen
     need = {"content","post_type","final_sentiment","specific_resource", "specific_resource_type","reply_to_original_id","original_id", "link","date_created"}
     df = trim_columns(df, need)
     df["content"] = df["content"].astype(str).str.lstrip("'")
@@ -280,11 +239,9 @@ def run_sosmed(df):
     date_col = get_date_column(df, ["date_created"])
     plat_col = "specific_resource_type" if df["specific_resource_type"].str.strip().any() else "specific_resource"
 
-    # ---------- SIDEBAR FILTER ----------
     st.sidebar.header("🎛️ Filter — Sosmed")
     stats_box = st.sidebar.empty()
     scope = st.sidebar.radio("Conversation", ("All","Tanpa Comment","Tanpa Post"), key="soc_scope")
-
     plat_values = sorted({p for p in df[plat_col].dropna() if str(p).strip()})
     sel_plat = []
     if plat_values:
@@ -293,119 +250,116 @@ def run_sosmed(df):
         for i,p in enumerate(plat_values):
             if cols[i].checkbox(p,True,key=f"plat_{p}",label_visibility="collapsed"): sel_plat.append(p)
             cols[i].markdown(platform_color_badge(p), unsafe_allow_html=True)
-
     sent_sel = st.sidebar.selectbox("Sentimen", ["All"] + sorted(df["final_sentiment"].str.lower().unique()))
     mode = st.sidebar.radio("Filter tanggal", ["Semua","Custom"], horizontal=True, key="soc_date_mode")
     use_date = False
     if mode=="Custom" and date_col and not df[date_col].dropna().empty:
         d_start,d_end = st.sidebar.date_input("Rentang", (df[date_col].min().date(), df[date_col].max().date()), key="soc_date_input"); use_date=True
-
-    if st.sidebar.button("🔄 Clear", key="soc_clear"): st.session_state.update(soc_kw="", soc_hl="")
+    if st.sidebar.button("🔄 Clear", key="soc_clear"): st.session_state.update(soc_kw="", soc_hl="", soc_summary="")
     kw = st.sidebar.text_input("Kata kunci (mendukung \"frasa\" dan -exclude)", key="soc_kw")
     hl = st.sidebar.text_input("Highlight Kata", key="soc_hl")
     show_wc = st.sidebar.checkbox("WordCloud", True, key="soc_wc")
 
-    # ---------- APPLY FILTER ----------
     m = pd.Series(True, df.index)
     if sel_plat: m &= df[plat_col].isin(sel_plat)
     if sent_sel!="All": m &= df["final_sentiment"].str.lower()==sent_sel
     if use_date and date_col: m &= df[date_col].dt.date.between(d_start,d_end)
-    
-    # Pemanggilan parser baru
     if kw:
         includes, phrases, exclude_phrases, exclude_groups = parse_adv(kw)
         m &= df["content"].apply(lambda x: match(x, includes, phrases, exclude_phrases, exclude_groups))
     filt = df[m]
 
-    # ---------- CONVERSATION SCOPE BUILD ----------
-    is_com  = filt["reply_to_original_id"].notna()
-    is_post = filt["post_type"].str.lower()=="post_made"
-
+    is_com  = filt["reply_to_original_id"].notna(); is_post = filt["post_type"].str.lower()=="post_made"
     if scope=="Tanpa Comment": filt_scope = filt[~is_com]
     elif scope=="Tanpa Post": filt_scope = filt[~is_post]
     else: filt_scope = filt
-
-    comments = filt_scope[is_com]
-    com_cnt  = comments.groupby("reply_to_original_id").size()
+    comments = filt_scope[is_com]; com_cnt  = comments.groupby("reply_to_original_id").size()
     com_sent = comments.groupby("reply_to_original_id")["final_sentiment"].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else None)
-
-    posts = filt_scope[is_post].copy()
-    posts["value"] = posts["original_id"].map(com_cnt).fillna(0).astype(int)
+    posts = filt_scope[is_post].copy(); posts["value"] = posts["original_id"].map(com_cnt).fillna(0).astype(int)
     posts["sent_final"] = posts["original_id"].map(com_sent).fillna(posts["final_sentiment"])
-
     talk = filt_scope[~is_post].copy(); talk["value"] = 1; talk["sent_final"]=talk["final_sentiment"]
-
     if scope=="Tanpa Post": base = talk
     elif scope=="Tanpa Comment": base = pd.concat([talk,posts],ignore_index=True)
-    else:
-        c_all=comments.copy(); c_all["value"]=1; c_all["sent_final"]=c_all["final_sentiment"]
-        base = pd.concat([talk,posts,c_all],ignore_index=True)
+    else: c_all=comments.copy(); c_all["value"]=1; c_all["sent_final"]=c_all["final_sentiment"]; base = pd.concat([talk,posts,c_all],ignore_index=True)
 
-    # ---------- SUMMARY ----------
     def best_link(series,val):
-        d = pd.DataFrame({"link":series,"val":val}).dropna()
-        d = d[d["link"].astype(str).str.strip()!=""]
+        d = pd.DataFrame({"link":series,"val":val}).dropna(); d = d[d["link"].astype(str).str.strip()!=""]
         return clean_url(d.sort_values("val",ascending=False)["link"].iloc[0]) if not d.empty else "-"
-
-    summary=(base.groupby("content", sort=False)
-             .agg(Total=("value","sum"), Sentiment=("sent_final",lambda x: x.mode().iloc[0] if not x.mode().empty else "-"),
-                  Link=("link", lambda x: best_link(x, base.loc[x.index,"value"])) )
-             .sort_values("Total",ascending=False).reset_index())
-
-    summary["Short"] = summary["content"].apply(safe_shorten)
-    summary["Text"]  = summary.apply(lambda r: f'<span title="{str(r.content)}">{r.Short}</span>', axis=1)
-    summary["Sentiment"] = summary["Sentiment"].apply(badge)
-    summary["Link"] = summary["Link"].apply(lambda u: f'<a href="{u}" target="_blank">Link</a>' if u!="-" else "-")
+    summary=(base.groupby("content", sort=False).agg(Total=("value","sum"), Sentiment=("sent_final",lambda x: x.mode().iloc[0] if not x.mode().empty else "-"), Link=("link", lambda x: best_link(x, base.loc[x.index,"value"])) ).sort_values("Total",ascending=False).reset_index())
+    summary["Short"] = summary["content"].apply(safe_shorten); summary["Text"]  = summary.apply(lambda r: f'<span title="{str(r.content)}">{r.Short}</span>', axis=1)
+    summary["Sentiment"] = summary["Sentiment"].apply(badge); summary["Link"] = summary["Link"].apply(lambda u: f'<a href="{u}" target="_blank">Link</a>' if u!="-" else "-")
     summary["Platform"] = summary["Link"].apply(lambda html: platform_from_url(re.search(r'href="([^"]+)"', html).group(1)) if "href" in html else "-")
     summary = summary[["Text","Total","Sentiment","Platform","Link"]]
-
     if hl:
         pat = re.compile("(?i)("+"|".join(map(re.escape, [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
         summary["Text"] = summary["Text"].apply(lambda t: pat.sub(r"<mark>\1</mark>", t))
 
-    # ---------- TEMPLATE GENERATOR ----------
-    st.markdown("#### 🔖 Copy Prompt Template (Sosmed)")
+    # LANGKAH 3: Ganti template dengan generator ringkasan
+    st.markdown("#### ✨ Ringkasan Otomatis (AI)")
     client_name = st.text_input("Nama Client", key="client_soc")
-    rows_tpl = [f"[{safe_shorten(c,80)}] ({n} Talk)" for c, n in zip(summary["Text"].head(100), summary["Total"].head(100))]
-    tmpl_text = generate_template(client_name, rows_tpl, "sosmed")
-    copy_template_component(tmpl_text, "soc")
+    if st.button("Buat Ringkasan Percakapan dengan Gemini", key="gen_soc"):
+        if not model:
+            st.warning("API Key Gemini belum dimasukkan di sidebar.")
+        elif summary.empty:
+            st.warning("Tidak ada data untuk diringkas. Sesuaikan filter Anda.")
+        else:
+            top_10_talks = summary.head(10)
+            def clean_html(raw_html): return re.sub(r'<.*?>', '', raw_html)
+            talks_list = [f"- Percakapan tentang \"{clean_html(row['Text'])}\" ({row['Total']} percakapan)" for index, row in top_10_talks.iterrows()]
+            talks_text = "\n".join(talks_list)
+            prompt = f"""Anda adalah seorang data analyst yang bergerak di bidang Sosial Media. Tugas Anda adalah mencari topik percakapan utama mengenai klien bernama "{client_name}". Di bawah ini adalah daftar 10 percakapan teratas beserta jumlahnya:\n{talks_text}\n\nBerdasarkan data di atas, buatlah sebuah rangkuman singkat (summary) dalam format poin-poin yang menyoroti topik-topik apa saja yang sedang ramai dibicarakan oleh netizen. Gunakan bahasa yang lebih santai dan fokus pada sentimen atau isu utama dalam percakapan."""
+            with st.spinner("Gemini sedang menyimak percakapan dan membuat ringkasan..."):
+                try:
+                    response = model.generate_content(prompt)
+                    st.session_state.soc_summary = response.text
+                except Exception as e:
+                    if "RESOURCE_EXHAUSTED" in str(e) or "quota" in str(e).lower():
+                        st.error("⚠️ Gagal: Anda telah mencapai batas kuota gratis harian untuk API Gemini. Coba lagi besok.")
+                    else:
+                        st.error(f"Terjadi kesalahan saat menghubungi Gemini: {e}")
 
-    # ---------- SIDEBAR STATS ----------
+    # LANGKAH 3: Tampilkan hasil di atas tabel
+    if 'soc_summary' in st.session_state and st.session_state.soc_summary:
+        with st.expander("📝 **Lihat Ringkasan Percakapan dari Gemini**", expanded=True):
+            st.markdown(st.session_state.soc_summary)
+            if st.button("Hapus Ringkasan", key="clear_soc_summary"):
+                st.session_state.soc_summary = ""
+                st.rerun()
+
     sl = filt["final_sentiment"].str.lower()
-    stats_box.markdown(f"""
-    <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>
-      <span style='font-size:24px'>📊</span>
-      <span style='font-size:26px;font-weight:bold'>{len(filt):,} Percakapan</span>
-    </div>
-    <div style='font-size:15px;'>
-      <span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span> |
-      <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span> |
-      <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span>
-    </div>
-    """, unsafe_allow_html=True)
-
+    stats_box.markdown(f"""<div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'><span style='font-size:24px'>📊</span><span style='font-size:26px;font-weight:bold'>{len(filt):,} Percakapan</span></div><div style='font-size:15px;'><span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span> | <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span> | <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span></div>""", unsafe_allow_html=True)
     st.markdown("### 📊 Ringkasan Topik (Sosmed)")
     st.caption(f"Dataset: {len(filt):,} | Summary: {len(summary):,}")
     st.write(summary.style.set_properties(subset=["Total","Link","Platform"], **{"text-align":"center"}).hide(axis="index").to_html(escape=False), unsafe_allow_html=True)
-
-    # ---------- WORD CLOUD (PERBAIKAN 4) ----------
     if show_wc:
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### ☁️ Word Cloud (Top 500)")
+        st.sidebar.markdown("---"); st.sidebar.markdown("### ☁️ Word Cloud (Top 500)")
         wc_dynamic = st.sidebar.checkbox("Wordcloud Dinamis (mengikuti filter)", value=False, key="soc_wc_dynamic")
-
         if wc_dynamic:
-            st.sidebar.caption("Mode: Dinamis (berdasarkan data terfilter)")
-            source_df = base
+            st.sidebar.caption("Mode: Dinamis (berdasarkan data terfilter)"); source_df = base
             wc_df = pd.DataFrame(word_freq(source_df["content"], 500), columns=["Kata", "Jumlah"])
         else:
-            st.sidebar.caption("Mode: Statis (berdasarkan data utama)")
-            source_df = df # Gunakan data asli sebelum difilter
+            st.sidebar.caption("Mode: Statis (berdasarkan data utama)"); source_df = df
             wc_df = pd.DataFrame(word_freq(source_df["content"], 500), columns=["Kata", "Jumlah"])
-
         st.sidebar.dataframe(wc_df, use_container_width=True)
 
 # ---------- ENTRY POINT --------------------------------------------------------
+st.sidebar.title("Pengaturan")
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+    st.sidebar.success("API Key Gemini ditemukan!", icon="✅")
+except (FileNotFoundError, KeyError):
+    st.sidebar.warning("Masukkan API Key di bawah untuk fitur AI.")
+    api_key = st.sidebar.text_input("Gemini API Key", type="password", key="api_key_input")
+
+model = None
+if api_key:
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    except Exception as e:
+        st.sidebar.error("API Key tidak valid.")
+
+st.sidebar.markdown("---")
 st.markdown("### 📁 Pilih sumber data")
 mode = st.radio("Input ZIP via:", ["Upload File", "Link Download"], horizontal=True)
 zip_data = None
@@ -425,37 +379,25 @@ if zip_data:
         df_all=extract_csv_from_zip(zip_data)
         if not df_all.empty: st.session_state.df=df_all
 
-# ---------- MAIN LOGIC (PERBAIKAN 1 & 2) ----------
+# ---------- MAIN LOGIC ----------
 if st.session_state.df is not None:
     df_raw = st.session_state.df
     cols_lower = {c.lower() for c in df_raw.columns}
-
-    # Tentukan tipe dashboard dan pangkas kolom yang tidak perlu
     if "tier" in cols_lower:
-        # ONM: Hanya simpan kolom yang dibutuhkan
         needed_cols = {"title", "body", "url", "tier", "sentiment", "label", "date_published"}
         df_onm = pd.DataFrame()
-        
-        current_cols = df_raw.columns
-        for col_name in current_cols:
+        for col_name in df_raw.columns:
             if col_name.lower() in needed_cols:
                 df_onm[col_name.lower()] = df_raw[col_name]
-        
-        run_onm(df_onm)
+        run_onm(df_onm, model) # LANGKAH 1: Kirim model ke fungsi
 
     elif {"content", "post_type", "final_sentiment"}.issubset(cols_lower):
-        # Sosmed: Hanya simpan kolom yang dibutuhkan
-        needed_cols = {"content", "post_type", "final_sentiment", "specific_resource", 
-                       "specific_resource_type", "reply_to_original_id", "original_id", 
-                       "link", "date_created"}
+        needed_cols = {"content", "post_type", "final_sentiment", "specific_resource", "specific_resource_type", "reply_to_original_id", "original_id", "link", "date_created"}
         df_sosmed = pd.DataFrame()
-        
-        current_cols = df_raw.columns
-        for col_name in current_cols:
+        for col_name in df_raw.columns:
             if col_name.lower() in needed_cols:
                 df_sosmed[col_name.lower()] = df_raw[col_name]
-        
-        run_sosmed(df_sosmed)
+        run_sosmed(df_sosmed, model) # LANGKAH 1: Kirim model ke fungsi
     else:
         st.error("❌ Struktur kolom tidak cocok (ONM/Sosmed). Pastikan kolom wajib ada.")
 else:
