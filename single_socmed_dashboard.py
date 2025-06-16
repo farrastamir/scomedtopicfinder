@@ -357,17 +357,15 @@ if api_key:
 st.sidebar.markdown("---")
 st.markdown("### 📁 Pilih sumber data")
 mode = st.radio("Input via:", ["Upload File", "Link Download"], horizontal=True)
-data_source = None # <<< MODIFIKASI: Menggunakan variabel generik 'data_source'
+data_source = None
 
 if mode == "Upload File":
-    # <<< MODIFIKASI: Mengubah label dan tipe file yang diterima
     up = st.file_uploader("Unggah file (.csv atau .zip)", type=["csv", "zip"])
     if up:
         data_source = up
 else:
     url = st.text_input("URL ZIP")
     if st.button("Proceed") and url:
-        # Logika download dari URL tidak diubah, tetap diasumsikan ZIP
         tmp = "/tmp/data.zip"
         try:
             urllib.request.urlretrieve(url, tmp)
@@ -378,20 +376,18 @@ else:
 if "df" not in st.session_state:
     st.session_state.df = None
 
-# <<< MODIFIKASI: Logika baru untuk menangani CSV dan ZIP
+# <<< MODIFIKASI: Logika untuk menangani CSV dan ZIP
 if data_source:
     with st.spinner("📖 Membaca data …"):
-        df_all = pd.DataFrame() # Inisialisasi dataframe kosong
+        df_all = pd.DataFrame()
         try:
-            # Dapatkan nama file, baik dari objek unggahan atau path string
             file_name = data_source.name if hasattr(data_source, 'name') else data_source
             
             if file_name.lower().endswith(".zip"):
-                st.write("Memproses file ZIP...")
+                # st.write("Memproses file ZIP...") # <<< DIHAPUS: Baris ini menyebabkan error layout
                 df_all = extract_csv_from_zip(data_source)
             elif file_name.lower().endswith(".csv"):
-                st.write("Memproses file CSV...")
-                # Membaca file CSV secara langsung dengan parameter yang sama
+                # st.write("Memproses file CSV...") # <<< DIHAPUS: Baris ini menyebabkan error layout
                 df_all = pd.read_csv(data_source, delimiter=";", quotechar='"',
                                      engine="python", on_bad_lines="skip", dtype=str)
             
@@ -399,21 +395,19 @@ if data_source:
                 st.session_state.df = df_all
         except Exception as e:
             st.error(f"❌ Terjadi kesalahan saat memproses file: {e}")
-            st.session_state.df = None # Reset jika ada error
+            st.session_state.df = None
 
 # ---------- MAIN LOGIC ----------
 if st.session_state.df is not None:
     df_raw = st.session_state.df
     cols_lower = {c.lower() for c in df_raw.columns}
     
-    # Deteksi Tipe Dataframe (ONM atau Sosmed)
     is_onm = "tier" in cols_lower and "title" in cols_lower
     is_sosmed = {"content", "post_type", "final_sentiment"}.issubset(cols_lower)
 
     if is_onm:
         needed_cols = {"title", "body", "url", "tier", "sentiment", "label", "date_published"}
         df_onm = pd.DataFrame()
-        # Membuat dataframe baru dengan nama kolom lowercase untuk konsistensi
         for col_name in df_raw.columns:
             if col_name.lower() in needed_cols:
                 df_onm[col_name.lower()] = df_raw[col_name]
@@ -422,7 +416,6 @@ if st.session_state.df is not None:
     elif is_sosmed:
         needed_cols = {"content", "post_type", "final_sentiment", "specific_resource", "specific_resource_type", "reply_to_original_id", "original_id", "link", "date_created"}
         df_sosmed = pd.DataFrame()
-        # Membuat dataframe baru dengan nama kolom lowercase untuk konsistensi
         for col_name in df_raw.columns:
             if col_name.lower() in needed_cols:
                 df_sosmed[col_name.lower()] = df_raw[col_name]
