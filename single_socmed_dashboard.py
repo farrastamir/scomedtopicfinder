@@ -1,6 +1,6 @@
 # =========================================================
 #  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
-#  2025-06-16  —  Integrated with Gemini for Auto-Summary
+#  2025-06-17  —  Integrated with Gemini & News Popup
 # =========================================================
 
 import streamlit as st, pandas as pd, re, textwrap, zipfile, urllib.request
@@ -8,8 +8,7 @@ import streamlit.components.v1 as components
 import google.generativeai as genai
 from collections import Counter
 
-# ... (SEMUA FUNGSI DARI ATAS SAMPAI run_sosmed TETAP SAMA) ...
-# ... (PASTIKAN SEMUA FUNGSI SEBELUM "ENTRY POINT" SUDAH DI-COPY)
+# ... (SEMUA FUNGSI DARI ATAS SAMPAI safe_shorten TETAP SAMA) ...
 
 # ---------- UTIL : URL & PLATFORM ----------
 def clean_url(u: str) -> str:
@@ -137,12 +136,18 @@ def safe_shorten(txt, width=120):
 
 # ---------- DASHBOARD : ONM ---------------------------------------------------
 def run_onm(df, model):
-    need = {"title", "body", "url", "tier", "sentiment", "label", "date_published"}
+    # --- MODIFIKASI: Menambahkan source_name dan pr_value ke kolom yang dibutuhkan
+    need = {"title", "body", "url", "tier", "sentiment", "label", "date_published", "source_name", "pr_value"}
     df = trim_columns(df, need)
     date_col = get_date_column(df, ["date_published"])
-    for c in ["title", "body", "url", "sentiment"]: df[c] = df[c].astype(str).str.strip("'")
+    for c in ["title", "body", "url", "sentiment", "source_name"]: df[c] = df[c].astype(str).str.strip("'")
     df["tier"] = df["tier"].fillna("-")
     df["label"] = df["label"].fillna("")
+    df["pr_value"] = pd.to_numeric(df["pr_value"], errors='coerce').fillna(0)
+
+    # --- MODIFIKASI: Inisialisasi session_state untuk popup
+    if 'selected_onm_title' not in st.session_state:
+        st.session_state.selected_onm_title = None
 
     st.sidebar.header("🎛️ Filter — ONM")
     stats_box = st.sidebar.empty()
@@ -168,21 +173,79 @@ def run_onm(df, model):
               df["body"].apply(lambda x: match(x, includes, phrases, exclude_phrases, exclude_groups)))
     filt = df[m]
 
+    # --- MODIFIKASI: Logika popup dipanggil di sini ---
+    # Jika sebuah judul berita telah dipilih, tampilkan dialog
+    if st.session_state.selected_onm_title:
+        # st.dialog secara otomatis menangani tombol silang dan tombol 'Esc'
+        @st.dialog("Detail Berita")
+        def show_news_popup(title_to_show):
+            article_group = filt[filt['title'] == title_to_show].reset_index()
+            if article_group.empty:
+                st.warning("Artikel tidak ditemukan. Filter mungkin telah berubah.")
+                if st.button("Tutup"):
+                    st.rerun()
+                return
+
+            # Ambil satu artikel sebagai sampel utama untuk ditampilkan
+            sample = article_group.iloc[0]
+            
+            # Persiapkan data untuk ditampilkan
+            title_display = sample['title']
+            body_display = sample['body'] if pd.notna(sample['body']) else "Konten tidak tersedia."
+            
+            # Terapkan highlight jika ada
+            if hl:
+                pat = re.compile("(?i)("+"|".join(map(re.escape, [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
+                title_display = pat.sub(r"<mark>\1</mark>", title_display)
+                body_display = pat.sub(r"<mark>\1</mark>", body_display)
+
+            # Layout popup: 2/3 untuk detail, 1/3 untuk daftar media
+            col1, col2 = st.columns([2, 1])
+
+            with col1:
+                st.markdown(f"### {title_display}", unsafe_allow_html=True)
+                st.markdown(f"**Media:** `{sample['source_name']}`")
+                
+                # Menampilkan tanggal dan PR Value jika ada
+                date_str = sample[date_col].strftime('%d %B %Y, %H:%M') if pd.notna(sample[date_col]) else "Tidak ada tanggal"
+                pr_val_str = f"Rp {sample['pr_value']:,.0f}" if sample['pr_value'] > 0 else "Tidak ada PR Value"
+                st.markdown(f"**Tanggal Terbit:** `{date_str}` | **PR Value:** `{pr_val_str}`")
+                
+                st.markdown("---")
+                # Gunakan st.markdown di dalam container dengan tinggi spesifik untuk membuat scrollbar jika konten panjang
+                with st.container(height=400):
+                    st.markdown(body_display, unsafe_allow_html=True)
+
+            with col2:
+                st.markdown("#### Media Lainnya")
+                st.caption("Daftar media unik yang memberitakan topik yang sama.")
+                media_list = article_group['source_name'].unique()
+                st.dataframe(pd.DataFrame(media_list, columns=["Nama Media"]), use_container_width=True, hide_index=True)
+
+        # Panggil fungsi dialog
+        show_news_popup(st.session_state.selected_onm_title)
+        
+        # Setelah dialog ditutup (oleh pengguna), reset state dan jalankan ulang
+        # agar kembali ke tampilan tabel utama.
+        st.session_state.selected_onm_title = None
+        st.rerun()
+
+    # --- Bagian Ringkasan AI (tetap sama) ---
+    st.markdown("#### ✨ Ringkasan Otomatis (AI)")
+    # Grouping data untuk ringkasan AI dan tabel utama
     rank = {"tier 1":0, "tier 2":1, "tier 3":2, "-":3, "":4}
     def best_link(g):
         g = g.copy()
         g["rk"] = g["tier"].str.lower().map(rank).fillna(4)
         return g.sort_values("rk")["url"].iloc[0] if not g.empty else "-"
-    gpd = (filt.groupby("title", sort=False).apply(best_link).to_frame("Link")
-           .join(filt.groupby("title").agg(Total=("title","size"), Sentiment=("sentiment", lambda x: x.mode().iloc[0] if not x.mode().empty else "-"))))
-    gpd = gpd.reset_index().sort_values("Total", ascending=False)
-    gpd["Sentiment"] = gpd["Sentiment"].apply(badge)
-    gpd["Link"] = gpd["Link"].apply(lambda u: f'<a href="{clean_url(u)}" target="_blank">Link</a>' if u!="-" else "-")
-    if hl:
-        pat = re.compile("(?i)("+"|".join(map(re.escape, [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
-        gpd["title"] = gpd["title"].apply(lambda t: pat.sub(r"<mark>\1</mark>", t))
-
-    st.markdown("#### ✨ Ringkasan Otomatis (AI)")
+    
+    if not filt.empty:
+        gpd = (filt.groupby("title", sort=False).apply(best_link).to_frame("Link")
+               .join(filt.groupby("title").agg(Total=("title","size"), Sentiment=("sentiment", lambda x: x.mode().iloc[0] if not x.mode().empty else "-"))))
+        gpd = gpd.reset_index().sort_values("Total", ascending=False)
+    else:
+        gpd = pd.DataFrame(columns=["title", "Link", "Total", "Sentiment"])
+        
     client_name = st.text_input("Nama Client", key="client_onm")
     if st.button("Buat Ringkasan Topik dengan Gemini", key="gen_onm"):
         if not model:
@@ -213,8 +276,45 @@ def run_onm(df, model):
 
     sl = filt["sentiment"].str.lower()
     stats_box.markdown(f"""<div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'><span style='font-size:24px'>📊</span><span style='font-size:26px;font-weight:bold'>{len(filt):,} Artikel</span></div><div style='font-size:15px;'><span style='color:green;font-weight:bold;'>🟢 {(sl=='positive').sum()}</span> | <span style='color:gray;font-weight:bold;'>⚪ {(sl=='neutral').sum()}</span> | <span style='color:red;font-weight:bold;'>🔴 {(sl=='negative').sum()}</span></div>""", unsafe_allow_html=True)
+    
     st.markdown("### 📊 Ringkasan Topik (ONM)")
-    st.write(gpd[["title","Total","Sentiment","Link"]].style.set_properties(subset=["Total","Link"], **{"text-align":"center"}).hide(axis="index").to_html(escape=False), unsafe_allow_html=True)
+
+    # --- MODIFIKASI: Mengganti st.write dengan loop untuk menampilkan tabel dengan tombol ---
+    # Header Tabel
+    header_cols = st.columns([0.5, 6, 1, 1.5, 1])
+    header_cols[0].markdown("**Detail**")
+    header_cols[1].markdown("**Judul Topik**")
+    header_cols[2].markdown("<div style='text-align: center;'>Total</div>", unsafe_allow_html=True)
+    header_cols[3].markdown("<div style='text-align: center;'>Sentimen</div>", unsafe_allow_html=True)
+    header_cols[4].markdown("<div style='text-align: center;'>Link</div>", unsafe_allow_html=True)
+    st.markdown("---")
+
+    if not gpd.empty:
+        gpd["Sentiment"] = gpd["Sentiment"].apply(badge)
+        gpd["Link"] = gpd["Link"].apply(lambda u: f'<a href="{clean_url(u)}" target="_blank">Teratas</a>' if u!="-" else "-")
+        
+        # Terapkan highlight pada judul di tabel utama
+        if hl:
+            pat = re.compile("(?i)("+"|".join(map(re.escape, [h.strip('"') for h in re.findall(r'"[^"]+"|\S+', hl)]))+")")
+            gpd["title"] = gpd["title"].apply(lambda t: pat.sub(r"<mark>\1</mark>", t))
+
+        # Loop untuk setiap baris data
+        for index, row in gpd.iterrows():
+            row_cols = st.columns([0.5, 6, 1, 1.5, 1])
+            # Kolom 0: Tombol popup
+            if row_cols[0].button("📰", key=f"onm_detail_{index}", help="Klik untuk melihat detail berita"):
+                st.session_state.selected_onm_title = row['title']
+                st.rerun()
+            
+            # Kolom selanjutnya: data berita
+            row_cols[1].markdown(row['title'], unsafe_allow_html=True)
+            row_cols[2].markdown(f"<div style='text-align: center;'>{row['Total']}</div>", unsafe_allow_html=True)
+            row_cols[3].markdown(f"<div style='text-align: center;'>{row['Sentiment']}</div>", unsafe_allow_html=True)
+            row_cols[4].markdown(f"<div style='text-align: center;'>{row['Link']}</div>", unsafe_allow_html=True)
+    else:
+        st.info("Tidak ada data topik untuk ditampilkan sesuai filter yang dipilih.")
+
+    # --- Bagian WordCloud (tetap sama) ---
     if show_wc:
         st.sidebar.markdown("---"); st.sidebar.markdown("### ☁️ Word Cloud (Top 500)")
         wc_dynamic = st.sidebar.checkbox("Wordcloud Dinamis (mengikuti filter)", value=False, key="onm_wc_dynamic")
@@ -222,12 +322,17 @@ def run_onm(df, model):
             st.sidebar.caption("Mode: Dinamis (berdasarkan data terfilter)"); source_df = filt
         else:
             st.sidebar.caption("Mode: Statis (berdasarkan data utama)"); source_df = df
-        wc_df = pd.DataFrame(word_freq(source_df["title"].tolist() + source_df["body"].tolist(), 500), columns=["Kata","Jumlah"])
-        st.sidebar.dataframe(wc_df, use_container_width=True)
+        
+        if not source_df.empty:
+            wc_df = pd.DataFrame(word_freq(source_df["title"].tolist() + source_df["body"].tolist(), 500), columns=["Kata","Jumlah"])
+            st.sidebar.dataframe(wc_df, use_container_width=True)
+        else:
+            st.sidebar.write("Tidak ada kata untuk ditampilkan.")
 
 
 # ---------- DASHBOARD : SOSMED -----------------------------------------------
 def run_sosmed(df, model):
+    # KODE FUNGSI run_sosmed TETAP SAMA SEPERTI ASLINYA
     need = {"content","post_type","final_sentiment","specific_resource", "specific_resource_type","reply_to_original_id","original_id", "link","date_created"}
     df = trim_columns(df, need)
     df["content"] = df["content"].astype(str).str.lstrip("'")
@@ -338,6 +443,9 @@ def run_sosmed(df, model):
         st.sidebar.dataframe(wc_df, use_container_width=True)
 
 # ---------- ENTRY POINT --------------------------------------------------------
+st.set_page_config(layout="wide") # --- MODIFIKASI: Menggunakan layout lebar untuk tampilan lebih baik
+st.title("Nolimit Dashboard Topic Summary")
+
 st.sidebar.title("Pengaturan")
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -368,7 +476,8 @@ else:
     if st.button("Proceed") and url:
         tmp = "/tmp/data.zip"
         try:
-            urllib.request.urlretrieve(url, tmp)
+            with st.spinner(f"Mengunduh dari {url}..."):
+                urllib.request.urlretrieve(url, tmp)
             data_source = tmp
         except Exception as e:
             st.error(f"❌ Gagal unduh: {e}")
@@ -384,10 +493,8 @@ if data_source:
             file_name = data_source.name if hasattr(data_source, 'name') else data_source
             
             if file_name.lower().endswith(".zip"):
-                # st.write("Memproses file ZIP...") # <<< DIHAPUS: Baris ini menyebabkan error layout
                 df_all = extract_csv_from_zip(data_source)
             elif file_name.lower().endswith(".csv"):
-                # st.write("Memproses file CSV...") # <<< DIHAPUS: Baris ini menyebabkan error layout
                 df_all = pd.read_csv(data_source, delimiter=";", quotechar='"',
                                      engine="python", on_bad_lines="skip", dtype=str)
             
@@ -398,30 +505,37 @@ if data_source:
             st.session_state.df = None
 
 # ---------- MAIN LOGIC ----------
-if st.session_state.df is not None:
+if st.session_state.df is not in None:
     df_raw = st.session_state.df
     cols_lower = {c.lower() for c in df_raw.columns}
     
-    is_onm = "tier" in cols_lower and "title" in cols_lower
+    # --- MODIFIKASI: Penyesuaian pengecekan kolom ONM
+    is_onm = {"title", "source_name", "body"}.issubset(cols_lower)
     is_sosmed = {"content", "post_type", "final_sentiment"}.issubset(cols_lower)
 
     if is_onm:
-        needed_cols = {"title", "body", "url", "tier", "sentiment", "label", "date_published"}
+        st.sidebar.success("Mode: Online News Media (ONM)", icon="📰")
+        # Menggunakan .copy() untuk menghindari SettingWithCopyWarning
+        df_onm_raw = df_raw.copy()
+        # Membuat duplikat kolom dengan nama lowercase untuk konsistensi
         df_onm = pd.DataFrame()
-        for col_name in df_raw.columns:
-            if col_name.lower() in needed_cols:
-                df_onm[col_name.lower()] = df_raw[col_name]
+        for col_name in df_onm_raw.columns:
+            df_onm[col_name.lower()] = df_onm_raw[col_name]
         run_onm(df_onm, model)
 
     elif is_sosmed:
-        needed_cols = {"content", "post_type", "final_sentiment", "specific_resource", "specific_resource_type", "reply_to_original_id", "original_id", "link", "date_created"}
+        st.sidebar.success("Mode: Social Media (Sosmed)", icon="📱")
+        # Menggunakan .copy() untuk menghindari SettingWithCopyWarning
+        df_sosmed_raw = df_raw.copy()
+        # Membuat duplikat kolom dengan nama lowercase untuk konsistensi
         df_sosmed = pd.DataFrame()
-        for col_name in df_raw.columns:
-            if col_name.lower() in needed_cols:
-                df_sosmed[col_name.lower()] = df_raw[col_name]
+        for col_name in df_sosmed_raw.columns:
+            df_sosmed[col_name.lower()] = df_sosmed_raw[col_name]
         run_sosmed(df_sosmed, model)
     else:
         st.error("❌ Struktur kolom tidak cocok (ONM/Sosmed). Pastikan kolom wajib ada.")
+        st.write("Kolom wajib ONM: `title`, `source_name`, `body`.")
+        st.write("Kolom wajib Sosmed: `content`, `post_type`, `final_sentiment`.")
         st.write("Kolom yang terdeteksi:", list(cols_lower))
 else:
-    st.info("Unggah atau tautkan file data (.csv atau .zip) terlebih dahulu.")
+    st.info("Unggah atau tautkan file data (.csv atau .zip) untuk memulai analisis.")
