@@ -548,4 +548,3 @@ if st.session_state.df is not None:
         st.write("Kolom yang terdeteksi:", list(cols_lower))
 else:
     st.info("Unggah atau tautkan file data (.csv atau .zip) untuk memulai analisis.")
-�
