@@ -514,7 +514,7 @@ if data_source:
                 df_all = extract_csv_from_zip(data_source)
             elif file_name.lower().endswith(".csv"):
                 df_all = pd.read_csv(data_source, delimiter=";", quotechar='"',
-                                     engine="python", on_bad_lines="skip", dtype=str)
+                                       engine="python", on_bad_lines="skip", dtype=str)
             
             if not df_all.empty:
                 st.session_state.df = df_all
@@ -523,9 +523,8 @@ if data_source:
             st.session_state.df = None
 
 # ---------- MAIN LOGIC ----------
-# PERBAIKAN: Mengganti "is not in None" dengan "is not None"
 if st.session_state.df is not None:
-    df_raw = st.session_state.df.copy() # Gunakan .copy() untuk keamanan
+    df_raw = st.session_state.df.copy()
     cols_lower = {c.lower() for c in df_raw.columns}
     
     is_onm = {"title", "source_name", "body"}.issubset(cols_lower)
@@ -539,7 +538,10 @@ if st.session_state.df is not None:
         run_onm(df_raw, model)
 
     elif is_sosmed:
-        st.sidebar.success("Mode: Social Media (Sosmed)", icon="�")
+        # ================================================================= #
+        # PERBAIKAN: Mengganti ikon '' yang rusak dengan emoji '💬' yang valid #
+        # ================================================================= #
+        st.sidebar.success("Mode: Social Media (Sosmed)", icon="💬")
         run_sosmed(df_raw, model)
     else:
         st.error("❌ Struktur kolom tidak cocok (ONM/Sosmed). Pastikan kolom wajib ada.")
