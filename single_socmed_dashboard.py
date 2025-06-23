@@ -1,14 +1,13 @@
 # =========================================================
 #  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
-#  MODIFIED: Menggunakan Parquet untuk analisis.
-#  Membutuhkan library dari requirements.txt untuk berjalan.
+#  FIXED: InvalidCharacterError (span) & Data Cleaning
 # =========================================================
 
 import streamlit as st, pandas as pd, re, textwrap, zipfile, urllib.request
 import streamlit.components.v1 as components
 import google.generativeai as genai
 from collections import Counter
-import io # Diperlukan untuk buffer Parquet di memori
+import io
 
 # ---------- UTIL : URL & PLATFORM ----------
 def clean_url(u: str) -> str:
@@ -19,12 +18,15 @@ PLATFORM_COLOR = {"youtube": "#FF0000", "tiktok": "#000000",
                   "instagram": "#C13584", "twitter": "#1DA1F2",
                   "x": "#1DA1F2", "facebook": "#1877F2"}
 
+# PERBAIKAN: Menulis ulang fungsi untuk memastikan tidak ada karakter aneh
 def platform_color_badge(name: str) -> str:
     key = name.lower()
     for k, c in PLATFORM_COLOR.items():
         if k in key:
+            # Pastikan string ini bersih
             return f'<span style="color:{c};font-weight:bold">{k.capitalize()}</span>'
-    return f'<span style="font-weight:bold">{name}</span>'
+    # Pastikan string ini bersih
+    return f'<span style-weight:bold">{name}</span>'
 
 def platform_from_url(url: str) -> str:
     m = re.search(r"https?://(?:www\.)?([^/]+)/", str(url).lower())
@@ -91,9 +93,12 @@ def word_freq(s, top=500):
     toks = [t for t in toks if t not in STOPWORDS]
     return Counter(toks).most_common(top)
 
+# PERBAIKAN: Menulis ulang fungsi untuk memastikan tidak ada karakter aneh
 def badge(val):
     clr = {"positive": "green", "negative": "red", "neutral": "gray"}.get(str(val).lower(), "black")
+    # Pastikan string ini bersih
     return f'<span style="color:{clr};font-weight:bold">{val}</span>'
+
 
 # ---------- ADVANCED KEYWORD PARSER V2 ----------
 def parse_adv(q: str):
@@ -137,9 +142,13 @@ def safe_shorten(txt, width=120):
 
 # ---------- DASHBOARD : ONM ---------------------------------------------------
 def run_onm(df, model):
-    # Fungsi ini tidak diubah
     need = {"title", "body", "url", "tier", "sentiment", "label", "date_published", "source_name", "pr_value"}
     df = trim_columns(df, need)
+    
+    # PERBAIKAN: Membersihkan kolom teks dari karakter aneh
+    df['title'] = df['title'].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True)
+    df['body'] = df['body'].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True)
+    
     date_col = get_date_column(df, ["date_published"])
     for c in ["title", "body", "url", "sentiment", "source_name"]: df[c] = df[c].astype(str).str.strip("'")
     df["tier"] = df["tier"].fillna("-")
@@ -279,9 +288,12 @@ def run_onm(df, model):
 
 # ---------- DASHBOARD : SOSMED -----------------------------------------------
 def run_sosmed(df, model):
-    # Fungsi ini tidak diubah
     need = {"content","post_type","final_sentiment","specific_resource", "specific_resource_type","reply_to_original_id","original_id", "link","date_created"}
     df = trim_columns(df, need)
+
+    # PERBAIKAN: Membersihkan kolom 'content' dari karakter aneh
+    df['content'] = df['content'].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True)
+
     df["content"] = df["content"].astype(str).str.lstrip("'")
     df["final_sentiment"] = df["final_sentiment"].astype(str).str.strip("\"' ")
     df["link"] = df["link"].apply(clean_url)
@@ -348,6 +360,7 @@ def run_sosmed(df, model):
     if not base.empty:
         summary=(base.groupby("content", sort=False).agg(Total=("value","sum"), Sentiment=("sent_final",lambda x: x.mode().iloc[0] if not x.mode().empty else "-"), Link=("link", lambda x: best_link(x, base.loc[x.index,"value"])) ).sort_values("Total",ascending=False).reset_index())
         summary["Short"] = summary["content"].apply(safe_shorten)
+        # PERBAIKAN: Menulis ulang baris ini untuk memastikan tidak ada karakter aneh
         summary["Text"]  = summary.apply(lambda r: f'<span title="{str(r.content)}">{r.Short}</span>', axis=1)
         summary["Sentiment"] = summary["Sentiment"].apply(badge)
         summary["Link"] = summary["Link"].apply(lambda u: f'<a href="{u}" target="_blank">Link</a>' if u!="-" else "-")
