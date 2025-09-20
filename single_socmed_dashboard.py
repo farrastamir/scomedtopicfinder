@@ -1,13 +1,14 @@
 # =========================================================
 #  Topic Summary NoLimit Dashboard — ONM & Sosmed (Streamlit)
-#  FIXED: InvalidCharacterError (span) & Data Cleaning
+#  FINAL VERSION: Menggunakan Ollama dengan pilihan model spesifik
 # =========================================================
 
 import streamlit as st, pandas as pd, re, textwrap, zipfile, urllib.request
 import streamlit.components.v1 as components
-import google.generativeai as genai
-from collections import Counter
 import io
+from collections import Counter
+import ollama
+import requests
 
 # ---------- UTIL : URL & PLATFORM ----------
 def clean_url(u: str) -> str:
@@ -18,14 +19,11 @@ PLATFORM_COLOR = {"youtube": "#FF0000", "tiktok": "#000000",
                   "instagram": "#C13584", "twitter": "#1DA1F2",
                   "x": "#1DA1F2", "facebook": "#1877F2"}
 
-# PERBAIKAN: Menulis ulang fungsi untuk memastikan tidak ada karakter aneh
 def platform_color_badge(name: str) -> str:
     key = name.lower()
     for k, c in PLATFORM_COLOR.items():
         if k in key:
-            # Pastikan string ini bersih
             return f'<span style="color:{c};font-weight:bold">{k.capitalize()}</span>'
-    # Pastikan string ini bersih
     return f'<span style-weight:bold">{name}</span>'
 
 def platform_from_url(url: str) -> str:
@@ -93,10 +91,8 @@ def word_freq(s, top=500):
     toks = [t for t in toks if t not in STOPWORDS]
     return Counter(toks).most_common(top)
 
-# PERBAIKAN: Menulis ulang fungsi untuk memastikan tidak ada karakter aneh
 def badge(val):
     clr = {"positive": "green", "negative": "red", "neutral": "gray"}.get(str(val).lower(), "black")
-    # Pastikan string ini bersih
     return f'<span style="color:{clr};font-weight:bold">{val}</span>'
 
 
@@ -141,11 +137,10 @@ def safe_shorten(txt, width=120):
         return str(txt)[:width] + "…"
 
 # ---------- DASHBOARD : ONM ---------------------------------------------------
-def run_onm(df, model):
+def run_onm(df, model: str): 
     need = {"title", "body", "url", "tier", "sentiment", "label", "date_published", "source_name", "pr_value"}
     df = trim_columns(df, need)
     
-    # PERBAIKAN: Membersihkan kolom teks dari karakter aneh
     df['title'] = df['title'].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True)
     df['body'] = df['body'].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True)
     
@@ -224,24 +219,24 @@ def run_onm(df, model):
     else:
         gpd = pd.DataFrame(columns=["title", "Link", "Total", "Sentiment"])
     client_name = st.text_input("Nama Client", key="client_onm")
-    if st.button("Buat Ringkasan Topik dengan Gemini", key="gen_onm"):
-        if not model: st.warning("API Key Gemini belum dimasukkan di sidebar.")
+    
+    if st.button("Buat Ringkasan Topik dengan Ollama", key="gen_onm"):
+        if not model: st.warning("Pilih model Ollama yang tersedia di sidebar.")
         elif gpd.empty: st.warning("Tidak ada data untuk diringkas. Sesuaikan filter Anda.")
         else:
             top_10_topics = gpd.head(10)
             topics_list = [f"- {row['title']} ({row['Total']} artikel)" for index, row in top_10_topics.iterrows()]
             topics_text = "\n".join(topics_list)
             prompt = f"""Anda adalah seorang data analyst yang bergerak di bidang Media Daring (Online News Media). Tugas Anda adalah merangkum topik pemberitaan utama mengenai klien bernama "{client_name}". Di bawah ini adalah daftar 10 topik teratas beserta jumlah artikelnya:\n{topics_text}\n\nBerdasarkan data di atas, buatlah sebuah ringkasan eksekutif (executive summary) dalam format poin-poin atau narasi singkat yang menyoroti isu-isu utama yang paling banyak dibicarakan. Fokus pada apa yang menjadi sorotan utama media."""
-            with st.spinner("Gemini sedang menganalisis dan membuat ringkasan..."):
+            with st.spinner(f"Ollama ({model}) sedang menganalisis dan membuat ringkasan..."):
                 try:
-                    response = model.generate_content(prompt)
-                    st.session_state.onm_summary = response.text
+                    response = ollama.generate(model=model, prompt=prompt)
+                    st.session_state.onm_summary = response['response']
                 except Exception as e:
-                    if "RESOURCE_EXHAUSTED" in str(e) or "quota" in str(e).lower():
-                        st.error("⚠️ Gagal: Anda telah mencapai batas kuota gratis harian untuk API Gemini. Coba lagi besok.")
-                    else: st.error(f"Terjadi kesalahan saat menghubungi Gemini: {e}")
+                    st.error(f"Terjadi kesalahan saat menghubungi Ollama: {e}. Pastikan Ollama sudah berjalan dan model '{model}' sudah terinstal.")
+    
     if 'onm_summary' in st.session_state and st.session_state.onm_summary:
-        with st.expander("📝 **Lihat Ringkasan Eksekutif dari Gemini**", expanded=True):
+        with st.expander("📝 **Lihat Ringkasan Eksekutif dari Ollama**", expanded=True):
             st.markdown(st.session_state.onm_summary)
             if st.button("Hapus Ringkasan", key="clear_onm_summary"):
                 st.session_state.onm_summary = ""
@@ -287,13 +282,10 @@ def run_onm(df, model):
         else: st.sidebar.write("Tidak ada kata untuk ditampilkan.")
 
 # ---------- DASHBOARD : SOSMED -----------------------------------------------
-def run_sosmed(df, model):
+def run_sosmed(df, model: str):
     need = {"content","post_type","final_sentiment","specific_resource", "specific_resource_type","reply_to_original_id","original_id", "link","date_created"}
     df = trim_columns(df, need)
-
-    # PERBAIKAN: Membersihkan kolom 'content' dari karakter aneh
     df['content'] = df['content'].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True)
-
     df["content"] = df["content"].astype(str).str.lstrip("'")
     df["final_sentiment"] = df["final_sentiment"].astype(str).str.strip("\"' ")
     df["link"] = df["link"].apply(clean_url)
@@ -360,7 +352,6 @@ def run_sosmed(df, model):
     if not base.empty:
         summary=(base.groupby("content", sort=False).agg(Total=("value","sum"), Sentiment=("sent_final",lambda x: x.mode().iloc[0] if not x.mode().empty else "-"), Link=("link", lambda x: best_link(x, base.loc[x.index,"value"])) ).sort_values("Total",ascending=False).reset_index())
         summary["Short"] = summary["content"].apply(safe_shorten)
-        # PERBAIKAN: Menulis ulang baris ini untuk memastikan tidak ada karakter aneh
         summary["Text"]  = summary.apply(lambda r: f'<span title="{str(r.content)}">{r.Short}</span>', axis=1)
         summary["Sentiment"] = summary["Sentiment"].apply(badge)
         summary["Link"] = summary["Link"].apply(lambda u: f'<a href="{u}" target="_blank">Link</a>' if u!="-" else "-")
@@ -372,8 +363,9 @@ def run_sosmed(df, model):
     else: summary = pd.DataFrame(columns=["Text","Total","Sentiment","Platform","Link"])
     st.markdown("#### ✨ Ringkasan Otomatis (AI)")
     client_name = st.text_input("Nama Client", key="client_soc")
-    if st.button("Buat Ringkasan Percakapan dengan Gemini", key="gen_soc"):
-        if not model: st.warning("API Key Gemini belum dimasukkan di sidebar.")
+    
+    if st.button("Buat Ringkasan Percakapan dengan Ollama", key="gen_soc"):
+        if not model: st.warning("Pilih model Ollama yang tersedia di sidebar.")
         elif summary.empty: st.warning("Tidak ada data untuk diringkas. Sesuaikan filter Anda.")
         else:
             top_10_talks = summary.head(10)
@@ -381,16 +373,15 @@ def run_sosmed(df, model):
             talks_list = [f"- Percakapan tentang \"{clean_html(row['Text'])}\" ({row['Total']} percakapan)" for index, row in top_10_talks.iterrows()]
             talks_text = "\n".join(talks_list)
             prompt = f"""Anda adalah seorang data analyst yang bergerak di bidang Sosial Media. Tugas Anda adalah mencari topik percakapan utama mengenai klien bernama "{client_name}". Di bawah ini adalah daftar 10 percakapan teratas beserta jumlahnya:\n{talks_text}\n\nBerdasarkan data di atas, buatlah sebuah rangkuman singkat (summary) dalam format poin-poin yang menyoroti topik-topik apa saja yang sedang ramai dibicarakan oleh netizen. Gunakan bahasa yang lebih santai dan fokus pada sentimen atau isu utama dalam percakapan."""
-            with st.spinner("Gemini sedang menyimak percakapan dan membuat ringkasan..."):
+            with st.spinner(f"Ollama ({model}) sedang menyimak percakapan dan membuat ringkasan..."):
                 try:
-                    response = model.generate_content(prompt)
-                    st.session_state.soc_summary = response.text
+                    response = ollama.generate(model=model, prompt=prompt)
+                    st.session_state.soc_summary = response['response']
                 except Exception as e:
-                    if "RESOURCE_EXHAUSTED" in str(e) or "quota" in str(e).lower():
-                        st.error("⚠️ Gagal: Anda telah mencapai batas kuota gratis harian untuk API Gemini. Coba lagi besok.")
-                    else: st.error(f"Terjadi kesalahan saat menghubungi Gemini: {e}")
+                    st.error(f"Terjadi kesalahan saat menghubungi Ollama: {e}. Pastikan Ollama sudah berjalan dan model '{model}' sudah terinstal.")
+
     if 'soc_summary' in st.session_state and st.session_state.soc_summary:
-        with st.expander("📝 **Lihat Ringkasan Percakapan dari Gemini**", expanded=True):
+        with st.expander("📝 **Lihat Ringkasan Percakapan dari Ollama**", expanded=True):
             st.markdown(st.session_state.soc_summary)
             if st.button("Hapus Ringkasan", key="clear_soc_summary"):
                 st.session_state.soc_summary = ""
@@ -415,20 +406,30 @@ def run_sosmed(df, model):
 
 # ---------- ENTRY POINT --------------------------------------------------------
 st.set_page_config(layout="wide")
-st.title("Nolimit Dashboard Topic Summary")
+st.title("Nolimit Dashboard Topic Summary (Ollama Offline)")
 st.sidebar.title("Pengaturan")
+
+selected_model = None
+st.sidebar.header("🤖 Pengaturan Model AI (Lokal)")
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    st.sidebar.success("API Key Gemini ditemukan!", icon="✅")
-except (FileNotFoundError, KeyError):
-    st.sidebar.warning("Masukkan API Key di bawah untuk fitur AI.")
-    api_key = st.sidebar.text_input("Gemini API Key", type="password", key="api_key_input")
-model = None
-if api_key:
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-    except Exception as e: st.sidebar.error("API Key tidak valid.")
+    # Periksa koneksi untuk memastikan server Ollama berjalan
+    requests.get("http://localhost:11434", timeout=1) 
+    st.sidebar.success("✅ Server Ollama terdeteksi!", icon="🚀")
+    
+    # Sediakan daftar model spesifik dengan default 'llama3.1'
+    model_options = ['llama3.1', 'gpt-oss']
+    selected_model = st.sidebar.selectbox(
+        "Pilih model Ollama yang akan digunakan:",
+        options=model_options,
+        index=0  # Menjadikan 'llama3.1' sebagai pilihan default
+    )
+
+except requests.exceptions.ConnectionError:
+    st.sidebar.error("❌ Gagal terhubung ke server Ollama.", icon="🔌")
+    st.sidebar.info("Pastikan aplikasi Ollama sudah berjalan di komputer Anda.")
+except Exception as e:
+    st.sidebar.error(f"Terjadi error: {e}")
+
 st.sidebar.markdown("---")
 st.markdown("### 📁 Pilih sumber data")
 mode = st.radio("Input via:", ["Upload File", "Link Download"], horizontal=True)
@@ -445,8 +446,10 @@ else:
                 urllib.request.urlretrieve(url, tmp)
             data_source = tmp
         except Exception as e: st.error(f"❌ Gagal unduh: {e}")
+
 if "parquet_buffer" not in st.session_state:
     st.session_state.parquet_buffer = None
+
 if data_source:
     with st.spinner("📖 Membaca dan mengonversi data ke Parquet..."):
         df_all = pd.DataFrame()
@@ -466,6 +469,7 @@ if data_source:
             st.error(f"❌ Terjadi kesalahan saat memproses file: {e}")
             st.session_state.parquet_buffer = None
     data_source = None
+
 # ---------- MAIN LOGIC ----------
 if st.session_state.parquet_buffer is not None:
     buffer = st.session_state.parquet_buffer
@@ -475,12 +479,13 @@ if st.session_state.parquet_buffer is not None:
     is_onm = {"title", "source_name", "body"}.issubset(cols_lower)
     is_sosmed = {"content", "post_type", "final_sentiment"}.issubset(cols_lower)
     df_raw.columns = [col.lower() for col in df_raw.columns]
+    
     if is_onm:
         st.sidebar.success("Mode: Online News Media (ONM)", icon="📰")
-        run_onm(df_raw, model)
+        run_onm(df_raw, selected_model)
     elif is_sosmed:
         st.sidebar.success("Mode: Social Media (Sosmed)", icon="💬")
-        run_sosmed(df_raw, model)
+        run_sosmed(df_raw, selected_model)
     else:
         st.error("❌ Struktur kolom tidak cocok (ONM/Sosmed). Pastikan kolom wajib ada.")
         st.write("Kolom wajib ONM: `title`, `source_name`, `body`.")
