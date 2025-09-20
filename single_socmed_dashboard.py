@@ -3,7 +3,12 @@
 #  FINAL VERSION: Menggunakan Ollama dengan pilihan model spesifik
 # =========================================================
 
-import streamlit as st, pandas as pd, re, textwrap, zipfile, urllib.request
+import streamlit as st
+import pandas as pd
+import re
+import textwrap
+import zipfile
+import urllib.request
 import streamlit.components.v1 as components
 import io
 from collections import Counter
